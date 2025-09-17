@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
+import inspect
 
 import draccus
 import numpy as np
@@ -82,6 +83,9 @@ class GenerateConfig:
     wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
     wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
 
+    vision_mode: str = ""
+    fraction: float = None
+
     seed: int = 7                                    # Random Seed (for reproducibility)
 
     # fmt: on
@@ -101,20 +105,53 @@ def eval_libero(cfg: GenerateConfig) -> None:
     cfg.unnorm_key = cfg.task_suite_name
 
     # Load model
+    # print("cfg fraction", cfg.fraction)
     model = get_model(cfg)
-
+    # print(f"\nAfter ckpt loaded with get_model: model.config.vision_mode={model.config.vision_mode},model.config.fraction={model.config.fraction}.\n")
     # [OpenVLA] Check that the model contains the action un-normalization key
     if cfg.model_family == "openvla":
         # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
         # with the suffix "_no_noops" in the dataset name)
         if cfg.unnorm_key not in model.norm_stats and f"{cfg.unnorm_key}_no_noops" in model.norm_stats:
             cfg.unnorm_key = f"{cfg.unnorm_key}_no_noops"
-        assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!"
+        # assert cfg.unnorm_key in model.norm_stats, f"Action un-norm key {cfg.unnorm_key} not found in VLA `norm_stats`!" #flag
+
+    def model_expects_proprio(model, processor=None):
+        # --- 1) Check config hints
+        cfg = getattr(model, "config", None)
+        if cfg is not None:
+            for attr in ["use_proprio", "proprio_dim", "proprio_keys", "state_dim"]:
+                if hasattr(cfg, attr):
+                    val = getattr(cfg, attr)
+                    if (isinstance(val, bool) and val) or \
+                    (isinstance(val, int) and val > 0) or \
+                    (isinstance(val, (list, tuple)) and len(val) > 0):
+                        return True, f"config.{attr}={val}"
+
+        # --- 2) Check processor hints
+        if processor is not None:
+            for attr in ["proprio_keys", "state_keys", "expects_proprio"]:
+                if hasattr(processor, attr):
+                    val = getattr(processor, attr)
+                    if (isinstance(val, bool) and val) or \
+                    (isinstance(val, (list, tuple)) and len(val) > 0):
+                        return True, f"processor.{attr}={val}"
+
+        # --- 3) Check forward signature for proprio-like kwargs
+        sig = inspect.signature(model.forward)
+        proprio_param_names = {"proprio", "state", "robot_state", "proprioceptive"}
+        if any(name in sig.parameters for name in proprio_param_names):
+            present = proprio_param_names.intersection(sig.parameters.keys())
+            return True, f"forward expects {sorted(present)}"
+
+        return False, "no proprio hints found"
 
     # [OpenVLA] Get Hugging Face processor
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
+    expects_proprio, reason = model_expects_proprio(model, processor)
+    print(f"[probe] model_expects_proprio={expects_proprio} ({reason})")
 
     # Initialize local logging
     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"

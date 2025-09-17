@@ -111,7 +111,7 @@ class PrismaticVisionBackbone(nn.Module):
                 if isinstance(module, LayerScale):
                     ls_apply_patch(module)
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor, mode="", fraction=None) -> torch.Tensor:
         """Run image (`pixel_values`) through featurizer; if channel-stacked, then dispatch and sequence stack."""
         if not self.use_fused_vision_backbone:
             return self.featurizer(pixel_values)
@@ -119,8 +119,37 @@ class PrismaticVisionBackbone(nn.Module):
         # Split `pixel_values :: [bsz, 2 * 3, resolution, resolution]` =>> featurize =>> channel stack
         img, img_fused = torch.split(pixel_values, [3, 3], dim=1)
         patches, patches_fused = self.featurizer(img), self.fused_featurizer(img_fused)
+        # mode, fraction = "DINO", 0.5
+        # print(f"---------- MODE {mode} --------------")
+        # print(f"---------- FRACTION {fraction} --------------")
+        if "DINO" in mode and fraction is not None:
+            # print("Previous feature", patches.sum())
+            bsz, seq_len, feat_dim = patches.shape
+            keep_count = int(feat_dim * fraction)
+            keep_idx = torch.randperm(feat_dim, device=patches.device)[:keep_count]
+            mask = torch.zeros(feat_dim, device=patches.device)
+            mask[keep_idx] = 1.0
+            # print("Total # keep indices", torch.sum(mask))
+            mask = mask.view(1, 1, feat_dim)
+            patches = (patches * mask).to(torch.bfloat16)
+            # print("DINO Afterwards", patches.sum())
+            print(f"------ {fraction} DINO features are randomly kept ------")
+        if "SIGLIP" in mode and fraction is not None:
+            # print("Previous feature", patches_fused.sum())
+            bsz, seq_len, feat_dim = patches_fused.shape
+            keep_count = int(feat_dim * fraction)
+            keep_idx = torch.randperm(feat_dim, device=patches_fused.device)[:keep_count]
+            mask = torch.zeros(feat_dim, device=patches_fused.device)
+            mask[keep_idx] = 1.0
+            # print("Total # keep indices", torch.sum(mask))
+            mask = mask.view(1, 1, feat_dim)
+            patches_fused = (patches_fused * mask).to(torch.bfloat16)
+            # print("Afterwards", patches_fused.sum())
+            print(f"------ {fraction} SIGLIP features are randomly kept ------")
 
         return torch.cat([patches, patches_fused], dim=2)
+        # print("Only DINO features are used!")
+        # return patches
 
 
 # === Prismatic Projector (nn.Module) Definitions ===
@@ -240,7 +269,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # Create Multimodal Projector
         self.projector = PrismaticProjector(
             config.use_fused_vision_backbone,
-            vision_dim=self.vision_backbone.embed_dim,
+            vision_dim=self.vision_backbone.embed_dim, #self.vision_backbone.featurizer.embed_dim,
             llm_dim=config.text_config.hidden_size,
         )
 
@@ -363,7 +392,9 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             assert past_key_values is None, "Unexpected key `past_key_values` provided during language-only forward!"
 
             # Visual Feature Extraction
-            patch_features = self.vision_backbone(pixel_values)
+            # print("vision mode", self.config.vision_mode)
+            # print("fraction", self.config.fraction)
+            patch_features = self.vision_backbone(pixel_values, mode=self.config.vision_mode, fraction=self.config.fraction)
 
             # Projection Logic =>> Update Attention Mask
             projected_patch_embeddings = self.projector(patch_features)
@@ -503,18 +534,27 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Compute vocab size for de-tokenization -- revert added "multiple of"
         self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
 
+        # self.vision_mode = self.config.vision_mode
+        # self.fraction = self.config.fraction
+        # print("self vision mode", self.vision_mode)
+        # print("self fraction", self.fraction)
+
     def predict_action(
         self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None, **kwargs: str
     ) -> np.ndarray:
         """Thin wrapper around .generate() that decodes predicted actions and unnormalizes them."""
         # If the special empty token ('') does not already appear after the colon (':') token in the prompt
         # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
+        # print("Entering predict action Prismatic Extern")
         if not torch.all(input_ids[:, -1] == 29871):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
 
         # Run VLA inference
+        # print("self vision mode", self.config.vision_mode)
+        # print("self fraction", self.config.fraction)
+        # print("kwargs", kwargs)
         generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
 
         # Extract predicted action tokens and translate into (normalized) continuous actions

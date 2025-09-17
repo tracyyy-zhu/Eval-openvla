@@ -11,6 +11,7 @@ import torch
 
 from prismatic.models.vlms import PrismaticVLM
 from prismatic.training.strategies import FSDPStrategy, TrainingStrategy
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 # Registry =>> Maps ID --> {cls(), kwargs} :: supports FSDP for now, but DDP handler is also implemented!
 TRAIN_STRATEGIES = {

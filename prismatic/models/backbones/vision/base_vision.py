@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Dict, Optional, Protocol, Tuple, Union
+import sys
 
 import timm
 import torch
@@ -188,6 +189,8 @@ class TimmViTBackbone(VisionBackbone, ABC):
 
     def forward(self, pixel_values: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         """Runs transformed image/pixel tensor through vision backbone, returning _all_ patch features."""
+        # print(pixel_values.shape)
+        # sys.exit()
         return self.featurizer(pixel_values)
 
     @property

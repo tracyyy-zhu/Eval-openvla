@@ -16,6 +16,7 @@ import warnings
 from abc import ABC, abstractmethod
 from functools import partial
 from typing import Callable, List, Optional, Sequence, Type
+import inspect
 
 import torch
 import torch.nn as nn
@@ -119,10 +120,11 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         #   => Note: We're eschewing use of the AutoModel API so that we can be more explicit about LLM-specific details
         if not self.inference_mode:
             overwatch.info(f"Loading [bold]{llm_family}[/] LLM from [underline]`{hf_hub_path}`[/]", ctx_level=1)
+            print("self.inference_mode", self.inference_mode) # can set use_flash_attention_2=False flag
             self.llm = llm_cls.from_pretrained(
                 hf_hub_path,
                 token=hf_token,
-                use_flash_attention_2=use_flash_attention_2 if not self.inference_mode else False,
+                use_flash_attention_2=False, #use_flash_attention_2 if not self.inference_mode else False,
                 # The following parameters are set to prevent `UserWarnings` from HF; we want greedy decoding!
                 do_sample=False,
                 temperature=1.0,
@@ -208,6 +210,8 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> CausalLMOutputWithPast:
+        print("LLM forward file", inspect.getsourcefile(self.llm.forward))
+        print("line number", inspect.getsourcelines(self.llm.forward)[1])
         output: CausalLMOutputWithPast = self.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,

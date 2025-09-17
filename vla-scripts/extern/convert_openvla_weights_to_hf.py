@@ -233,6 +233,7 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     # Create PrismaticForConditionalGeneration =>> Note that we can't initialize on `meta` device because TIMM
     print("[*] Building (Randomly Initialized) Model =>> OpenVLAForActionPrediction")
     hf_model = OpenVLAForActionPrediction(hf_config)
+    print("hf_model.projector", hf_model.projector)
     hf_model.load_state_dict(converted_state_dict, strict=True, assign=True)
 
     # Cast Model to BF16 before Saving

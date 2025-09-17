@@ -5,11 +5,14 @@ Core class definition for a strategy implementing Torch native Fully Sharded Dat
 fine-grained control over wrapping policies and mixed precision per component).
 """
 
+import os
 import math
 from collections import OrderedDict
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
+import contextlib
+import sys
 
 import torch
 import torch.distributed as dist
@@ -101,11 +104,20 @@ class FSDPStrategy(TrainingStrategy):
         only_trainable: bool = True,
     ) -> None:
         """Save a checkpoint to the `run_dir` only containing the state_dicts for trainable parameters by default."""
-        assert isinstance(self.vlm, FSDP), "FSDPStrategy.save_checkpoint assumes VLM is already wrapped in FSDP!"
+        # assert isinstance(self.vlm, FSDP), "FSDPStrategy.save_checkpoint assumes VLM is already wrapped in FSDP!"
+        
+        full_cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with contextlib.ExitStack() as stack:
+            if isinstance(self.vlm, FSDP):
+                stack.enter_context(FSDP.state_dict_type(self.vlm, StateDictType.FULL_STATE_DICT, full_cfg))
+            for m in self.vlm.modules():
+                if isinstance(m, FSDP) and m is not self.vlm:
+                    stack.enter_context(FSDP.state_dict_type(m, StateDictType.FULL_STATE_DICT, full_cfg))
+            full_vlm_state_dict = self.vlm.state_dict()
 
         # Summon Full State Dictionary =>> Reconstitute from Shards
         with FSDP.state_dict_type(self.vlm, self.fsdp_state_dict_type, self.fsdp_save_policy):
-            full_vlm_state_dict = self.vlm.state_dict()
+            # full_vlm_state_dict = self.vlm.state_dict()
             model_state_dicts = {
                 mkey: OrderedDict() for mkey in (self.trainable_module_keys if only_trainable else self.all_module_keys)
             }
@@ -132,9 +144,14 @@ class FSDPStrategy(TrainingStrategy):
                 # TODO (siddk) :: This breaks w/ Sagemaker default permissions (root vs. <user>)... skip?
                 # shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
 
+    def unwrap_all(self, m):
+        while isinstance(m, FSDP): m = m.module
+        return m
+
     def run_setup(self, run_dir: Path, n_train_examples: int) -> None:
         # Iteratively Assemble FSDP Wrapping Policy by fetching the wrapping policies for each backbone/constituent
-        vlm_fsdp_wrapping_policy = self.vlm.get_fsdp_wrapping_policy()
+        # vlm_fsdp_wrapping_policy = self.vlm.get_fsdp_wrapping_policy()
+        vlm_fsdp_wrapping_policy = self.vlm.get_projector_wrapping_policy() # Wrap only projector
 
         # Assemble the Default FSDP Mixed Precision Policy
         if self.enable_mixed_precision_training and self.mixed_precision_dtype == torch.bfloat16:
@@ -153,19 +170,54 @@ class FSDPStrategy(TrainingStrategy):
         else:
             # If we're not using mixed precision, everything is in default full precision!
             fsdp_precision_policy = MixedPrecision(
-                param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32
+                param_dtype=torch.float16, reduce_dtype=torch.float16, buffer_dtype=torch.float16
             )
 
         # <FSDP> => note that FSDP will automatically take care of device placement (similar to `autocast`)
-        self.vlm = FSDP(
-            self.vlm,
+        # base  = self.unwrap_all(self.vlm)
+        # llm   = self.unwrap_all(base.llm_backbone)
+        # llama = getattr(llm, "llm", llm)
+
+        # emb = llama.get_input_embeddings().weight
+        # head = llama.get_output_embeddings().weight
+        # assert emb.ndim == 2 and head.ndim == 2, (emb.shape, head.shape)
+
+        # self.vlm = FSDP(
+        #     self.vlm,
+        #     auto_wrap_policy=vlm_fsdp_wrapping_policy,
+        #     mixed_precision=fsdp_precision_policy,
+        #     sharding_strategy=self.fsdp_sharding_strategy,
+        #     device_id=torch.cuda.current_device(),
+        #     limit_all_gathers=True,
+        #     use_orig_params=True,
+        #     ignored_modules=[inp, out],
+        # )
+        self.vlm.projector = FSDP(
+            self.vlm.projector, 
             auto_wrap_policy=vlm_fsdp_wrapping_policy,
             mixed_precision=fsdp_precision_policy,
             sharding_strategy=self.fsdp_sharding_strategy,
             device_id=torch.cuda.current_device(),
             limit_all_gathers=True,
-            use_orig_params=True,
-        )
+            use_orig_params=True)
+        
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        self.vlm.to(device)
+
+        def assert_same_device(*mods):
+            devs = []
+            for m in mods:
+                t = next(m.parameters(), None)
+                if t is None:
+                    t = next(m.buffers(), None)
+                if t is None:
+                    continue  # skip paramless
+                devs.append(t.device)
+            assert len(set(devs)) <= 1, f"Device mismatch: {devs}"
+
+        assert_same_device(self.vlm.vision_backbone, self.vlm.llm_backbone, self.vlm.projector.module)
 
         # Gradient Checkpoint Setup
         if self.enable_gradient_checkpointing:
@@ -216,6 +268,7 @@ class FSDPStrategy(TrainingStrategy):
             # Create Optimizer & LR Scheduler
             self.optimizer = AdamW(groups, lr=self.learning_rate)
             self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
+            # self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps, num_cycles=1.5) # need to change max_steps
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = 0.0
 
@@ -242,6 +295,44 @@ class FSDPStrategy(TrainingStrategy):
             self.optimizer = AdamW(groups, lr=self.learning_rate)
             self.lr_scheduler = get_constant_schedule(self.optimizer)
 
+        elif self.lr_scheduler_type == "align_cosine_decay":
+            # Set warmup steps (floor) based on `warmup_ratio` (should be 0.03 - 0.05)
+            num_warmup_steps = int(num_training_steps * self.warmup_ratio)
+            print("self.warmup_ratio", self.warmup_ratio)
+            print("num_warmup_steps", num_warmup_steps)
+
+            # Default AdamW w/ specified LR & Linear Warmup / Cosine Decay & Weight Decay
+            #   => Create Parameter Groups --> bias terms, normalization layer parameters shouldn't be decayed!
+            decay, no_decay = [], []
+            for name, param in self.vlm.named_parameters():
+                if not param.requires_grad:
+                    continue
+
+                # Check on any parameters with fewer than 2 dimensions or with "bias" in the name
+                if param.ndim <= 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+
+            # Build Parameter Groups
+            groups = [{"params": decay, "weight_decay": self.weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+            print("self.weight_decay", self.weight_decay)
+
+            # Create Optimizer & LR Scheduler
+            self.optimizer = AdamW(groups, lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-8)
+            self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
+
+            # LR range test
+            # self.optimizer = AdamW(groups, lr=2e-6, betas=(0.9, 0.98), eps=1e-8)
+            # lr_start, lr_end = 2e-7, 5e-2
+            # T = 1000
+            # def lr_lambda(step):
+            #     r = lr_end / lr_start
+            #     return (r ** (step / max(1, T-1)))
+            # for pg in self.optimizer.param_groups:
+            #     pg['lr'] = lr_start
+            # self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+
         else:
             raise ValueError(f"Learning Rate Schedule with type `{self.lr_scheduler_type}` is not supported!")
 
@@ -267,4 +358,5 @@ class FSDPStrategy(TrainingStrategy):
 
     def clip_grad_norm(self) -> None:
         # Note =>> FSDP uses a custom `clip_grad_norm_` function; requires *uniform grad dtype*
-        self.vlm.clip_grad_norm_(max_norm=self.max_grad_norm)
+        # self.vlm.clip_grad_norm_(max_norm=self.max_grad_norm)
+        self.vlm.projector.clip_grad_norm_(max_norm=self.max_grad_norm)

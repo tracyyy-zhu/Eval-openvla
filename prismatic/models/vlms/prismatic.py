@@ -14,6 +14,8 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Type, Union
+import inspect
+import sys
 
 import torch
 from PIL import Image
@@ -26,6 +28,7 @@ from prismatic.models.backbones.vision import VisionBackbone
 from prismatic.models.vlms.base_vlm import VLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.util.nn_utils import FusedMLPProjector, LinearProjector, MLPProjector
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -61,7 +64,14 @@ class PrismaticVLM(VLM):
         if arch_specifier == "linear":
             self.projector = LinearProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         elif arch_specifier.endswith("fused-gelu-mlp"):
-            self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
+            # self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
+            print("Using FusedMLPProjector")
+            self.projector = FusedMLPProjector(vision_backbone.dino_featurizer.embed_dim, llm_backbone.embed_dim)
+            print(self.projector) 
+            num_params = sum(p.numel() for p in self.projector.parameters())
+            print(f"Total parameters in projector: {num_params:,}")
+            trainable_params = sum(p.numel() for p in self.projector.parameters() if p.requires_grad)
+            print(f"Trainable parameters in projector: {trainable_params:,}")
         elif arch_specifier.endswith("gelu-mlp"):
             self.projector = MLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
         else:
@@ -95,6 +105,10 @@ class PrismaticVLM(VLM):
         **kwargs,
     ) -> PrismaticVLM:
         """Initialize a PrismaticVLM from a pretrained checkpoint, freezing all weights, tailored for inference."""
+        file_name = inspect.getsourcefile(cls)
+        line_number = inspect.getsourcelines(cls)[1]
+        print(f"Function defined in: {file_name}, line {line_number}") #flag
+
         vlm = cls(
             model_id,
             vision_backbone,
@@ -104,13 +118,19 @@ class PrismaticVLM(VLM):
             **kwargs,
         )
 
+        if hasattr(vlm.llm_backbone, "config"): #flag
+            vlm.llm_backbone.config.use_cache = False
+            vlm.llm_backbone.config.output_attentions = False
+            vlm.llm_backbone.config.output_hidden_states = False
+
         # Load from Checkpoint (Custom --> should load both *projector* and *llm* weights)
         model_state_dict = torch.load(pretrained_checkpoint, map_location="cpu")["model"]
         assert (
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
         ), "PrismaticVLM `from_pretrained` expects checkpoint with keys for `projector` AND `llm_backbone`!"
 
-        vlm.projector.load_state_dict(model_state_dict["projector"])
+        # vlm.projector.load_state_dict(model_state_dict["projector"])
+        # Keep projector weights randomly initialized
         vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
         if "vision_backbone" in model_state_dict.keys():
             vlm.vision_backbone.load_state_dict(model_state_dict["vision_backbone"])
@@ -305,6 +325,19 @@ class PrismaticVLM(VLM):
             ],
         )
 
+    def get_projector_wrapping_policy(self) -> Callable:
+        """Return an FSDP _or_policy over the policies returned by each individual backbone (and our VLM policy)."""
+        # Get Prismatic Wrapping Policy =>> just a module wrapping policy around `self.projector`
+        prismatic_fsdp_wrapping_policy = partial(
+            _module_wrap_policy,
+            module_classes={LinearProjector, MLPProjector, FusedMLPProjector},
+        )
+
+        # Return union (_or_) over constituent policies
+        #   => Note: there is *not* a fall-through policy; any module that isn't covered by the above constituents will
+        #            automatically be folded into the root VLM FSDP instance.
+        return prismatic_fsdp_wrapping_policy
+
     # Note =>> We're not explicitly subclassing `PreTrainedModel` because we don't need the bloat; however, `forward()`
     #          *must* match the signature of a `{Model}ForCausalLM` so that we can inherit from `GenerationMixin`
 
@@ -324,7 +357,6 @@ class PrismaticVLM(VLM):
         multimodal_indices: Optional[torch.LongTensor] = None,
     ) -> CausalLMOutputWithPast:
         """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
-
         # Handle Inference (leverage cache, short-circuit on just LLM forward)
         if input_ids.shape[1] == 1 and past_key_values is not None:
             # We're leveraging the cache, so just redirect to `self.llm_backbone` with `input_ids` and `past_key_values`

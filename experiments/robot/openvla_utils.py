@@ -3,12 +3,14 @@
 import json
 import os
 import time
+import sys
 
 import numpy as np
 import tensorflow as tf
 import torch
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+import inspect
 
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
@@ -40,15 +42,33 @@ def get_vla(cfg):
     AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
+    # 1) load the HF config (with your custom class)
+    config = AutoConfig.from_pretrained(
+        cfg.pretrained_checkpoint,
+        trust_remote_code=False,
+    )
+
+    # 2) override with your CLI flags
+    config.vision_mode = cfg.vision_mode
+    config.fraction = cfg.fraction
+
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,
-        attn_implementation="flash_attention_2",
+        config=config,
+        attn_implementation="eager", #"flash_attention_2",
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
         low_cpu_mem_usage=True,
-        trust_remote_code=True,
+        trust_remote_code=False, # True
     )
+    # print("vla fraction after loaded from pretrained", vla.config.fraction)
+
+    # # print where its forward() lives
+    # print(inspect.getsourcefile(vla.forward))
+    # # and dump the code
+    # print(inspect.getsource(vla.forward))
+    # sys.exit()
 
     # Move model to device.
     # Note: `.to()` is not supported for 8-bit or 4-bit bitsandbytes models, but the model will
@@ -62,6 +82,10 @@ def get_vla(cfg):
         with open(dataset_statistics_path, "r") as f:
             norm_stats = json.load(f)
         vla.norm_stats = norm_stats
+        print("cfg.unnorm_key", cfg.unnorm_key)
+        print("vla.norm_stats.keys()", vla.norm_stats.keys())
+        if cfg.unnorm_key not in vla.norm_stats.keys():
+            vla.norm_stats[cfg.unnorm_key] = vla.norm_stats.pop("bridge_orig")
     else:
         print(
             "WARNING: No local dataset_statistics.json file found for current checkpoint.\n"
@@ -166,5 +190,9 @@ def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, c
     inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
 
     # Get action.
+    # print("type VLA", type(vla))
+    # print("file path", inspect.getsourcefile(vla.predict_action))  # file path
+    # sys.exit()
+    # print(f"can vla that does vla.predict_action have fraction and mode: vla.config.vision_mode={vla.config.vision_mode},vla.config.fraction={vla.config.fraction}.")
     action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
     return action

@@ -19,6 +19,7 @@ from prismatic.models.vlas import OpenVLA
 from prismatic.models.vlms import PrismaticVLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.vla.action_tokenizer import ActionTokenizer
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -114,6 +115,8 @@ def load(
         arch_specifier=model_cfg["arch_specifier"],
         freeze_weights=not load_for_training,
     )
+    print("================ Model is FSDP-wrapped after from_pretrained:")
+    print(vlm.projector)
 
     return vlm
 

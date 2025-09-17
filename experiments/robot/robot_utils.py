@@ -37,13 +37,53 @@ def set_seed_everywhere(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def get_model(cfg, wrap_diffusion_policy_for_droid=False):
+def check_layer_zero_frozen(model: torch.nn.Module, layer_prefix: str) -> None:
+    for name, param in model.named_parameters():
+        if layer_prefix in name:
+            total_abs = param.data.abs().sum().item()
+            print(f"{name}: sum_abs={total_abs:.6f}, requires_grad={param.requires_grad}")
+
+            # assert total_abs == 0.0, f"Non-zero weights in {name}"
+            # assert not param.requires_grad, f"{name} is not frozen!"
+
+
+def disable_vision_vla(model, vision=None):
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            lname = name.lower()
+            if vision in "both":
+                # DinoV2 is registered as featurizer
+                # SigLIP is registered as fused_featurizer
+                if 'featurizer' in lname or 'fused_featurizer' in lname:
+                    param.data.zero_()
+                    param.requires_grad = False
+            elif vision in "dino":
+                if '.featurizer.' in lname:
+                    param.data.zero_()
+                    param.requires_grad = False
+            elif vision in "siglip":
+                if '.fused_featurizer.' in lname:
+                    param.data.zero_()
+                    param.requires_grad = False
+        check_layer_zero_frozen(model, "vision_backbone.featurizer.blocks.0.attn.qkv.weight")
+        check_layer_zero_frozen(model, "vision_backbone.featurizer.blocks.1.attn.qkv.bias")
+        check_layer_zero_frozen(model, "vision_backbone.fused_featurizer.blocks.0.attn.qkv.weight")
+        check_layer_zero_frozen(model, "vision_backbone.fused_featurizer.blocks.1.attn.qkv.bias")
+
+    return model
+
+
+def get_model(cfg, vision=None, wrap_diffusion_policy_for_droid=False):
     """Load model for evaluation."""
     if cfg.model_family == "openvla":
         model = get_vla(cfg)
     else:
         raise ValueError("Unexpected `model_family` found in config.")
     print(f"Loaded model: {type(model)}")
+
+    # if vision is not None:
+    #     model = disable_vision_vla(model, vision)
+    #     print("[*] DINOv2 encoders have been zeroed and frozen.")
     return model
 
 

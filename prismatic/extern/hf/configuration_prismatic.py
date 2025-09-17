@@ -85,6 +85,8 @@ class PrismaticConfig(PretrainedConfig):
         pad_token_id: int = 32000,
         pad_to_multiple_of: int = 64,
         output_projector_states: bool = False,
+        # vision_mode: str = "DINO",
+        # fraction: float = 0.5,
         **kwargs: str,
     ) -> None:
         if vision_backbone_id not in VALID_VISION_BACKBONES:
@@ -115,6 +117,9 @@ class PrismaticConfig(PretrainedConfig):
         self.llm_max_length = llm_max_length
         self.pad_token_id, self.pad_to_multiple_of = pad_token_id, pad_to_multiple_of
 
+        # self.vision_mode = vision_mode
+        # self.fraction = vision_fraction
+
         # [IMPORTANT] HF Utilities actually look for a `text_config` field... we need to use that specific naming!
         self.text_config = (
             CONFIG_MAPPING[LLM_BACKBONE_TO_HF_METACLASS[self.llm_backbone_id]](**text_config)
@@ -133,8 +138,10 @@ class OpenVLAConfig(PrismaticConfig):
         self,
         norm_stats: Optional[Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]]] = None,
         n_action_bins: int = 256,
+        # vision_mode: str = "DINO",
         **kwargs: str,
     ) -> None:
+        # self.vision_mode = vision_mode
         self.norm_stats, self.n_action_bins = norm_stats, n_action_bins
 
         super().__init__(**kwargs)

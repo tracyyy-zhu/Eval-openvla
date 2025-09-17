@@ -25,6 +25,7 @@ from prismatic.util import check_bloat16_supported
 from prismatic.util.batching_utils import SplitModalitySampler
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling
 from prismatic.vla.action_tokenizer import ActionTokenizer
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 # Initialize Overwatch =>> Wraps `logging.Logger`
 overwatch = initialize_overwatch(__name__)
@@ -264,6 +265,8 @@ class TrainingStrategy(ABC):
             num_workers=0,
             worker_init_fn=self.worker_init_fn,
         )
+        print("len(vla_dataset)", len(vla_dataset))
+        print("len(dataloader)", len(dataloader))
 
         # === Train ===
         status = metrics.get_status()
@@ -276,16 +279,33 @@ class TrainingStrategy(ABC):
             self.vlm.train()
 
             # Zero Gradients (just in case)
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             # [Contract] DataLoader wraps RLDS Loader (`.as_numpy_iterator() =>> implicit `.repeat()`)
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
+            # n_step = 0
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             for batch in dataloader:
                 # Note that we'll unpack batch (and let AMP/FSDP do its thing) in the VLM.forward() call
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
+                # print(f"=============== STEP {n_step} ====================")
+                # n_step += 1                
+                def move_to_device(batch, device):
+                    if torch.is_tensor(batch):
+                        return batch.to(device, non_blocking=True)
+                    elif isinstance(batch, dict):
+                        return {k: move_to_device(v, device) for k, v in batch.items()}
+                    elif isinstance(batch, list):
+                        return [move_to_device(v, device) for v in batch]
+                    else:
+                        return batch                    
+                batch = move_to_device(batch, device)
+
                 with torch.autocast(
-                    "cuda", dtype=self.mixed_precision_dtype, enabled=self.enable_mixed_precision_training
+                    "cuda", 
+                    dtype=torch.float16, # self.mixed_precision_dtype, flag
+                    enabled=True, # self.enable_mixed_precision_training flag
                 ):
                     # [Contract] self.vlm.forward() must automatically compute `loss` and return!
                     output: CausalLMOutputWithPast = self.vlm(
@@ -363,7 +383,21 @@ class TrainingStrategy(ABC):
                 # Optimizer & LR Scheduler Step
                 self.optimizer.step()
                 self.lr_scheduler.step()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                def check_grads_none(model):
+                    # Returns (num_params, num_none, num_tensor)
+                    num_params = num_none = num_tensor = 0
+                    for p in model.parameters():
+                        if not p.requires_grad: 
+                            continue
+                        num_params += 1
+                        if p.grad is None:
+                            num_none += 1
+                        else:
+                            num_tensor += 1
+                    return num_params, num_none, num_tensor
+                n_total, n_none, n_tensor = check_grads_none(self.vlm)
 
                 # Compute epoch value using number of completed gradient steps
                 epoch = (metrics.global_step + 1) // (len(vla_dataset) // self.global_batch_size)
@@ -387,3 +421,59 @@ class TrainingStrategy(ABC):
                 # Update Progress Bar
                 progress.update()
                 progress.set_description(status)
+
+    def unwrap_all(self, m):
+        # return m.module if isinstance(m, FSDP) else m
+        while isinstance(m, FSDP): m = m.module
+        return m
+    
+    def locate_llm_params(self, vlm):
+        base = self.unwrap_all(vlm)                       # PrismaticVLM
+        llm_backbone = self.unwrap_all(base.llm_backbone) # your backbone wrapper
+        llama = getattr(llm_backbone, "llm", llm_backbone)
+        llama = self.unwrap_all(llama)                    # transformers LlamaForCausalLM or similar
+        core = getattr(llama, "model", llama)        # handle models that keep core under .model
+
+        embed = getattr(getattr(core, "embed_tokens", None), "weight", None)
+        head  = getattr(getattr(llama, "lm_head", None), "weight", None)
+        return embed, head, llama
+    
+    def show_llm(self, tag, vlm):
+        # base = self.unwrap(vlm)
+        # llm  = self.unwrap(base.llm_backbone)
+        # try:
+        #     emb = llm.get_input_embeddings().weight
+        # except Exception:
+        #     emb = getattr(getattr(llm, "model", None), "embed_tokens", None)
+        #     emb = getattr(emb, "weight", None)
+        # try:
+        #     outm = llm.get_output_embeddings()
+        #     head = getattr(outm, "weight", None)
+        # except Exception:
+        #     head = getattr(getattr(llm, "lm_head", None), "weight", None)
+
+        # print(f"[{tag}] emb shape={None if emb is None else tuple(emb.shape)}  id={None if emb is None else id(emb)}")
+        # print(f"[{tag}] head shape={None if head is None else tuple(head.shape)} id={None if head is None else id(head)}")
+        emb, head, llama = self.locate_llm_params(vlm)
+        print(f"[{tag}] emb:", None if emb is None else (tuple(emb.shape), id(emb), emb.data_ptr()))
+        print(f"[{tag}] head:", None if head is None else (tuple(head.shape), id(head), head.data_ptr()))
+        # Optional: are they actually tied?
+        if emb is not None and head is not None:
+            print(f"[{tag}] tied_storage:", emb.data_ptr() == head.data_ptr())
+
+    def trace_shapes(self, mod):
+        for name, p in mod.named_parameters():
+            if p.ndim == 2 and p.shape == (32064, 4096):
+                print("[TRACE-2D]", name, p.shape, p.data_ptr())
+            elif p.ndim == 1 and p.numel() == 32064*4096:
+                print("[TRACE-1D]", name, p.shape, p.data_ptr())
+
+    def report_handles(self, mod):
+        for name, m in mod.named_modules():
+            if isinstance(m, FSDP):
+                # List the parameters that this handle will manage
+                try:
+                    for pn, pp in m.named_parameters(recurse=False):
+                        print(f"[FSDP-HANDLE] {name or '<ROOT>'} :: {pn} shape={pp.shape} data_ptr={pp.data_ptr()}")
+                except Exception:
+                    pass
