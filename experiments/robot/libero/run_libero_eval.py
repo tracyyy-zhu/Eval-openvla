@@ -152,6 +152,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
         processor = get_processor(cfg)
     expects_proprio, reason = model_expects_proprio(model, processor)
     print(f"[probe] model_expects_proprio={expects_proprio} ({reason})")
+    # print("VLA model config=============")
+    # print(model.config)
+    print("Model norm_stats ======================")
+    print(model.norm_stats)
+    sys.exit()
 
     # Initialize local logging
     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
