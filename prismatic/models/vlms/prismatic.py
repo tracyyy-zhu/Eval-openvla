@@ -66,7 +66,7 @@ class PrismaticVLM(VLM):
         elif arch_specifier.endswith("fused-gelu-mlp"):
             # self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
             print("Using FusedMLPProjector")
-            self.projector = FusedMLPProjector(vision_backbone.dino_featurizer.embed_dim, llm_backbone.embed_dim)
+            self.projector = FusedMLPProjector(vision_backbone.siglip_featurizer.embed_dim, llm_backbone.embed_dim)
             print(self.projector) 
             num_params = sum(p.numel() for p in self.projector.parameters())
             print(f"Total parameters in projector: {num_params:,}")

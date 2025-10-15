@@ -132,14 +132,17 @@ class FSDPStrategy(TrainingStrategy):
             if overwatch.is_rank_zero():
                 checkpoint_dir = run_dir / "checkpoints"
                 if train_loss is None:
-                    checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss=inf.pt"
+                    checkpoint_path = checkpoint_dir / f"SigLIP-step-{global_step:06d}-epoch-{epoch:02d}-loss=inf.pt" #flag
                 else:
                     checkpoint_path = (
                         checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss={train_loss:.4f}.pt"
                     )
 
                 # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
+                print("checkpoint_path", checkpoint_path)
+                # checkpoint_path /scratch/yz5880/openvla/checkpoints/single_projector/DINO/OpenVLA_train/checkpoints/step-000002-epoch-00-loss=10.8889.pt
                 torch.save({"model": model_state_dicts}, checkpoint_path)
+
 
                 # TODO (siddk) :: This breaks w/ Sagemaker default permissions (root vs. <user>)... skip?
                 # shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")

@@ -123,7 +123,7 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     # Get `config.json`, 'dataset_statistics.json' and `checkpoint_pt` -- mirrors logic in `prismatic.models.load.py`
     if os.path.isdir(cfg.openvla_model_path_or_id):
         print(f"[*] Loading from Local Path `{(run_dir := Path(cfg.openvla_model_path_or_id))}`")
-        config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "latest-checkpoint.pt"
+        config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "latest-checkpoint.pt" # / "step-000002-epoch-00-loss=10.8889.pt"
         dataset_statistics_json = run_dir / "dataset_statistics.json"
 
         assert config_json.exists(), f"Missing `config.json` for `{run_dir = }`"
@@ -221,6 +221,22 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     assert ("downsampler" not in model_state_dict) or (len(model_state_dict["downsampler"]) == 0), "Downsampler?"
     assert all([k in model_state_dict for k in ["vision_backbone", "projector", "llm_backbone"]]), "Missing keys!"
 
+    # def print_shapes(prefix, state_dict):
+    #     for k, v in state_dict.items():
+    #         full_key = f"{prefix}.{k}" if prefix else k
+    #         if isinstance(v, torch.Tensor):
+    #             print(f"{full_key}: {tuple(v.shape)}")
+    #         elif isinstance(v, dict):
+    #             print_shapes(full_key, v)
+
+    # print("===== Before conversion =====")
+    # for k, v in model_state_dict.items():
+    #     if "projector" in k:
+    #         if isinstance(v, torch.Tensor):
+    #             print(f"{k}: {tuple(v.shape)}")
+    #         elif isinstance(v, dict):
+    #             print_shapes(k, v)
+
     # Convert
     print("[*] Running Conversion")
     converted_state_dict = remap_state_dicts_for_hf(
@@ -229,6 +245,19 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
         model_state_dict["llm_backbone"],
         use_fused_vision_backbone=hf_config.use_fused_vision_backbone,
     )
+
+    print("===== Projector shape in model_state_dict =====")
+    for k, v in converted_state_dict.items():
+        if "projector" in k:
+            print(f"{k}: {tuple(v.shape)}")
+
+    # ===== Projector shape in model_state_dict =====  (DINO)
+    # projector.fc1.weight: (8704, 2176)
+    # projector.fc1.bias: (8704,)
+    # projector.fc2.weight: (4096, 8704)
+    # projector.fc2.bias: (4096,)
+    # projector.fc3.weight: (4096, 4096)
+    # projector.fc3.bias: (4096,)
 
     # Create PrismaticForConditionalGeneration =>> Note that we can't initialize on `meta` device because TIMM
     print("[*] Building (Randomly Initialized) Model =>> OpenVLAForActionPrediction")

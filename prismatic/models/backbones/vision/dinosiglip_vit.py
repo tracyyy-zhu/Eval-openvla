@@ -27,6 +27,10 @@ DINOSigLIP_VISION_BACKBONES = {
         "dino": "vit_large_patch14_reg4_dinov2.lvd142m",
         "siglip": "vit_so400m_patch14_siglip_384",
     },
+    "dinov3siglip": {
+        "dino": "vit_large_patch16_dinov3_qkvb",
+        "siglip": "vit_so400m_patch14_siglip_224"
+    }
 }
 
 
@@ -147,8 +151,8 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         # print("siglip_patches.shape", siglip_patches.shape)
 
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
-        print("Only DINO vision features are used!")
-        return dino_patches
+        print("Only SigLIP vision features are used!")
+        return siglip_patches
         # print("Only SigLIP vision features are used!")
         # return siglip_patches
 
