@@ -224,6 +224,8 @@ def load_vla(
         freeze_weights=not load_for_training,
         norm_stats=norm_stats,
         action_tokenizer=action_tokenizer,
+        skip_vision=True,
+        skip_projector=True,
     )
 
     return vla

@@ -20,6 +20,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Union
+from collections import OrderedDict
 
 import draccus
 import timm
@@ -113,6 +114,64 @@ def remap_state_dicts_for_hf(
                 hf_state_dict[key.replace("siglip_featurizer.", "vision_backbone.fused_featurizer.")] = value
 
     return hf_state_dict
+
+def remap_openvla_backbone_keys(hf_model, state_dict, *, single_backbone=True):
+    """
+    Remap checkpoint keys to match OpenVLAForActionPrediction module names.
+    - single_backbone=True: map *everything* DINO -> vision_backbone.
+    - single_backbone=False: map DINO -> vision_backbone, SigLIP -> vision_backbone_2.
+    Drops any key not present in the target model, or with shape mismatch.
+    """
+    rules = []
+    # 1) DINO backbone
+    rules.append(("dino_vision_backbone.", "vision_backbone."))
+    # Some converters produce shorter roots like "dino_featurizer.":
+    rules.append(("dino_featurizer.", "vision_backbone.featurizer."))
+    # Some produce "vision_backbone.dino_featurizer.":
+    rules.append(("vision_backbone.dino_featurizer.", "vision_backbone.featurizer."))
+    # Some produce "dino_backbone.": (belt & suspenders)
+    rules.append(("dino_backbone.", "vision_backbone."))
+
+    # 2) Optional second encoder (SigLIP) → vision_backbone_2
+    if not single_backbone:
+        rules.append(("siglip_vision_backbone.", "vision_backbone_2."))
+        rules.append(("siglip_featurizer.", "vision_backbone_2.featurizer."))
+        rules.append(("vision_backbone.siglip_featurizer.", "vision_backbone_2.featurizer."))
+
+    tgt = hf_model.state_dict()
+    out = OrderedDict()
+    dropped = []
+
+    for k, v in state_dict.items():
+        k2 = k
+        for a, b in rules:
+            if a in k2:
+                k2 = k2.replace(a, b)
+
+        # If the model doesn't have this param, skip it (covers things like vit.reg_token)
+        if k2 not in tgt:
+            dropped.append((k, "missing_in_target", k2))
+            continue
+
+        # Shape guard (avoid accidental mapping to a wrong slot)
+        if tgt[k2].shape != v.shape:
+            dropped.append((k, f"shape_mismatch {tuple(v.shape)} -> {tuple(tgt[k2].shape)}", k2))
+            continue
+
+        out[k2] = v
+
+    # For quick diagnostics
+    print(f"[Remap] kept: {len(out)}  dropped: {len(dropped)}  target_total: {len(tgt)}")
+    if dropped[:8]:
+        print("[Remap] first few dropped examples:")
+        for d in dropped[:8]:
+            print("   ", d)
+
+    # Report what will still be missing after we try to load (helps find typos in rules)
+    still_missing = [k for k in tgt.keys() if k not in out]
+    print(f"[Remap] still_missing_in_out: {len(still_missing)} (will be randomly init)")
+
+    return out
 
 
 @draccus.wrap()
@@ -263,6 +322,14 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     print("[*] Building (Randomly Initialized) Model =>> OpenVLAForActionPrediction")
     hf_model = OpenVLAForActionPrediction(hf_config)
     print("hf_model.projector", hf_model.projector)
+    # remapped = remap_openvla_backbone_keys(
+    #     hf_model,
+    #     converted_state_dict,
+    #     single_backbone=True  # set False if you actually have DINO + SigLIP in this checkpoint
+    # )
+    # missing, unexpected = hf_model.load_state_dict(remapped, strict=True, assign=True)
+    # print("[load] missing:", missing)
+    # print("[load] unexpected:", unexpected)
     hf_model.load_state_dict(converted_state_dict, strict=True, assign=True)
 
     # Cast Model to BF16 before Saving
@@ -270,7 +337,9 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
 
     # Save Pretrained Versions to Local Path
     print("[*] Saving Model & Processor to Local Path")
-    hf_model.save_pretrained(cfg.output_hf_model_local_path, max_shard_size="7GB")
+    hf_model.save_pretrained(cfg.output_hf_model_local_path, 
+                             safe_serialization=False,   # disable .safetensors alias check
+                             max_shard_size="7GB")
     hf_image_processor.save_pretrained(cfg.output_hf_model_local_path)
     hf_processor.save_pretrained(cfg.output_hf_model_local_path)
 

@@ -26,6 +26,7 @@ import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
+from prismatic.models.backbones.vision.timm_vit_intermediate import TimmViTIntermediate #flag
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
@@ -75,13 +76,14 @@ class PrismaticVisionBackbone(nn.Module):
         #   =>> Note :: Monkey-Patch the `forward()` function of the backbone to ensure FSDP-compatibility
         #               Hardcodes `get_intermediate_layers` to return the **SECOND-TO-LAST** layer patches!
         assert len(timm_model_ids) <= 2, "Prismatic models only support up to 2 (fused) vision backbones!"
-        self.featurizer = timm.create_model(
+        featurizer = timm.create_model( #flag
             timm_model_ids[0],
             pretrained=False,
             num_classes=0,
             img_size=image_sizes[0],
             act_layer=timm_override_act_layers[0],
         )
+        self.featurizer = TimmViTIntermediate(featurizer) #flag
         self.featurizer.forward = unpack_tuple(
             partial(self.featurizer.get_intermediate_layers, n={len(self.featurizer.blocks) - 2})
         )
@@ -89,6 +91,7 @@ class PrismaticVisionBackbone(nn.Module):
 
         # If `use_fused_vision_backbone` =>> create "beta" featurizer
         if self.use_fused_vision_backbone:
+            print("Creating fused_featurizer...")
             self.fused_featurizer = timm.create_model(
                 timm_model_ids[1],
                 pretrained=False,
@@ -247,11 +250,11 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if config.use_fused_vision_backbone is None:
             raise ValueError("Missing config field `use_fused_vision_backbone`")
 
-        if timm.__version__ not in {"0.9.10", "0.9.11", "0.9.12", "0.9.16"}:
-            raise NotImplementedError(
-                "TIMM Version must be >= 0.9.10 and < 1.0.0 (breaking); please raise a GitHub Issue "
-                "if you urgently need support for latest TIMM versions."
-            )
+        # if timm.__version__ not in {"0.9.10", "0.9.11", "0.9.12", "0.9.16"}:
+        #     raise NotImplementedError(
+        #         "TIMM Version must be >= 0.9.10 and < 1.0.0 (breaking); please raise a GitHub Issue "
+        #         "if you urgently need support for latest TIMM versions."
+        #     )
 
         if (transformers.__version__ != "4.40.1") or (tokenizers.__version__ != "0.19.1"):
             logger.warning(
@@ -269,7 +272,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # Create Multimodal Projector
         self.projector = PrismaticProjector(
             config.use_fused_vision_backbone,
-            vision_dim=self.vision_backbone.fused_featurizer.embed_dim, #self.vision_backbone.featurizer.embed_dim, self.vision_backbone.embed_dim,
+            vision_dim=self.vision_backbone.featurizer.embed_dim, #self.vision_backbone.fused_featurizer.embed_dim, #self.vision_backbone.featurizer.embed_dim, self.vision_backbone.embed_dim, #flag
             llm_dim=config.text_config.hidden_size,
         )
 

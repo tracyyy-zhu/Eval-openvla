@@ -6,14 +6,17 @@ Vision backbone that returns concatenated features from both DINOv2 and SigLIP.
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, Sequence
 
 import timm
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from timm.models.vision_transformer import Block, VisionTransformer
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy, transformer_auto_wrap_policy
 from torchvision.transforms import Compose, Resize
+from .timm_vit_intermediate import TimmViTIntermediate
 
 from prismatic.models.backbones.vision.base_vision import ImageTransform, LetterboxPad, VisionBackbone, unpack_tuple
 
@@ -27,8 +30,8 @@ DINOSigLIP_VISION_BACKBONES = {
         "dino": "vit_large_patch14_reg4_dinov2.lvd142m",
         "siglip": "vit_so400m_patch14_siglip_384",
     },
-    "dinov3siglip": {
-        "dino": "vit_large_patch16_dinov3_qkvb",
+    "dinov3-siglip": {
+        "dino": "vit_large_patch16_dinov3_qkvb.lvd1689m",
         "siglip": "vit_so400m_patch14_siglip_224"
     }
 }
@@ -45,16 +48,19 @@ class DinoSigLIPImageTransform:
 
 
 class DinoSigLIPViTBackbone(VisionBackbone):
-    def __init__(self, vision_backbone_id: str, image_resize_strategy: str, default_image_size: int = 224) -> None:
+    def __init__(self, vision_backbone_id: str, image_resize_strategy: str, default_image_size: int = 224, v_encoder="DINOv3") -> None:
         super().__init__(vision_backbone_id, image_resize_strategy, default_image_size=default_image_size)
         self.dino_timm_path_or_url = DINOSigLIP_VISION_BACKBONES[vision_backbone_id]["dino"]
+        if "vit_large_patch16_dinov3_qkvb" in self.dino_timm_path_or_url:
+            print("Using DINOv3!")
         self.siglip_timm_path_or_url = DINOSigLIP_VISION_BACKBONES[vision_backbone_id]["siglip"]
 
         # Initialize both Featurizers (ViTs) by downloading from HF / TIMM Hub if necessary
-        self.dino_featurizer: VisionTransformer = timm.create_model(
+        base_vit: VisionTransformer = timm.create_model(
             self.dino_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
         )
-        self.dino_featurizer.eval()
+        base_vit.eval()
+        self.dino_featurizer = TimmViTIntermediate(base_vit).eval()
 
         self.siglip_featurizer: VisionTransformer = timm.create_model(
             self.siglip_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
@@ -64,8 +70,9 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         # Monkey-Patch the `forward()` function of the featurizers to ensure FSDP-compatibility
         #   => Note: By default set `get_intermediate_layers` to return the *SECOND-TO-LAST* layer patches!
         #   => TODO (siddk) Remove after resolution of https://github.com/pytorch/pytorch/issues/109385
+        k_last = max(1, len(self.dino_featurizer.blocks) - 2)
         self.dino_featurizer.forward = unpack_tuple(
-            partial(self.dino_featurizer.get_intermediate_layers, n={len(self.dino_featurizer.blocks) - 2})
+            partial(self.dino_featurizer.get_intermediate_layers, n=k_last, apply_norm=True)
         )
         self.siglip_featurizer.forward = unpack_tuple(
             partial(self.siglip_featurizer.get_intermediate_layers, n={len(self.siglip_featurizer.blocks) - 2})
@@ -136,6 +143,48 @@ class DinoSigLIPViTBackbone(VisionBackbone):
 
         else:
             raise ValueError(f"Image Resize Strategy `{self.image_resize_strategy}` is not supported!")
+        
+        self.v_encoder = v_encoder
+        
+    def finetune_last_layer_modules(self):
+        if "DINOv3" in self.v_encoder:
+            d = self.dino_featurizer
+            # Final norm(s)
+            if hasattr(d, "norm"): self.unfreeze(d.norm)
+            if hasattr(d, "vit") and hasattr(d.vit, "norm"): self.unfreeze(d.vit.norm)
+
+            # Helper to get the actual blocks list regardless of wrapper
+            blocks = None
+            if hasattr(d, "blocks"):
+                blocks = d.blocks
+            elif hasattr(d, "vit") and hasattr(d.vit, "blocks"):
+                blocks = d.vit.blocks
+            else:
+                raise RuntimeError("Could not find blocks in dino_featurizer")
+
+            # Unfreeze last K blocks (set K=2 or 4)
+            K = 2
+            n = len(blocks)  # should be 24
+            for i in range(n-K, n):
+                blk = blocks[i]
+                # attn + mlp weights
+                self.unfreeze(blk.attn.qkv)
+                self.unfreeze(blk.attn.proj)
+                self.unfreeze(blk.mlp.fc1)
+                self.unfreeze(blk.mlp.fc2)
+                # norms in these blocks
+                self.unfreeze(blk.norm1)
+                self.unfreeze(blk.norm2)
+            
+            # total_params = sum(p.numel() for p in d.parameters())
+            # trainable_params = sum(p.numel() for p in d.parameters() if p.requires_grad)
+            # print(f"Total parameters: {total_params/1e6:.2f}M")
+            # print(f"Trainable parameters: {trainable_params/1e6:.2f}M")
+            # print(f"Percentage trainable: {100 * trainable_params / total_params:.2f}%")
+
+    def unfreeze(self, m):
+        for p in m.parameters():
+            p.requires_grad = True
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         """Return a simple FSDP policy that wraps each ViT block and then both of the _entire_ featurizers."""
@@ -143,16 +192,41 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         transformer_block_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
         return partial(_or_policy, policies=[vit_wrap_policy, transformer_block_policy])
 
+    def resize_token_grid(self, tokens: torch.Tensor, from_hw: tuple[int,int], to_hw: tuple[int,int]):
+        """
+        tokens: (B, N, C) where N = H*W
+        from_hw: (H_from, W_from)
+        to_hw:   (H_to, W_to)
+        Returns: (B, H_to*W_to, C)
+        """
+        B, N, C = tokens.shape
+        Hf, Wf = from_hw
+        assert N == Hf * Wf
+        x = tokens.view(B, Hf, Wf, C).permute(0, 3, 1, 2)   # (B, C, Hf, Wf)
+        x = F.interpolate(x, size=to_hw, mode="bilinear", align_corners=False)
+        x = x.permute(0, 2, 3, 1).contiguous().view(B, to_hw[0]*to_hw[1], C)
+        return x
+    
+    def hw_from_num_patches(self, num_patches: int) -> tuple[int,int]:
+        h = int(num_patches ** 0.5)
+        assert h * h == num_patches, f"Non-square grid: {num_patches}"
+        return (h, h)
+
     def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
-        siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
-        # print("dino_patches.shape", dino_patches.shape)
-        # print("siglip_patches.shape", siglip_patches.shape)
+        # siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
+        N_d = self.dino_featurizer.patch_embed.num_patches
+        N_s = self.siglip_featurizer.patch_embed.num_patches
+        if N_s != N_d:
+            Hd, Wd = self.hw_from_num_patches(N_d)
+            Hs, Ws = self.hw_from_num_patches(N_s)
+            dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
+            print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
-        print("Only SigLIP vision features are used!")
-        return siglip_patches
+        print("Only DINO vision features are used!")
+        return dino_patches
         # print("Only SigLIP vision features are used!")
         # return siglip_patches
 
@@ -166,8 +240,8 @@ class DinoSigLIPViTBackbone(VisionBackbone):
 
     @property
     def num_patches(self) -> int:
-        assert self.dino_featurizer.patch_embed.num_patches == self.siglip_featurizer.patch_embed.num_patches
-        return self.dino_featurizer.patch_embed.num_patches
+        # assert self.dino_featurizer.patch_embed.num_patches == self.siglip_featurizer.patch_embed.num_patches
+        return self.siglip_featurizer.patch_embed.num_patches
 
     @property
     def half_precision_dtype(self) -> torch.dtype:

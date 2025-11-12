@@ -66,7 +66,8 @@ class PrismaticVLM(VLM):
         elif arch_specifier.endswith("fused-gelu-mlp"):
             # self.projector = FusedMLPProjector(vision_backbone.embed_dim, llm_backbone.embed_dim)
             print("Using FusedMLPProjector")
-            self.projector = FusedMLPProjector(vision_backbone.siglip_featurizer.embed_dim, llm_backbone.embed_dim)
+            self.projector = FusedMLPProjector(vision_backbone.dino_featurizer.embed_dim, llm_backbone.embed_dim)
+            # self.projector = FusedMLPProjector(vision_backbone.siglip_featurizer.embed_dim, llm_backbone.embed_dim) #flag
             print(self.projector) 
             num_params = sum(p.numel() for p in self.projector.parameters())
             print(f"Total parameters in projector: {num_params:,}")
@@ -102,6 +103,8 @@ class PrismaticVLM(VLM):
         enable_mixed_precision_training: bool = True,
         arch_specifier: str = "gelu-mlp",
         freeze_weights: bool = True,
+        skip_vision: bool = False,
+        skip_projector: bool = False,
         **kwargs,
     ) -> PrismaticVLM:
         """Initialize a PrismaticVLM from a pretrained checkpoint, freezing all weights, tailored for inference."""
@@ -129,11 +132,11 @@ class PrismaticVLM(VLM):
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
         ), "PrismaticVLM `from_pretrained` expects checkpoint with keys for `projector` AND `llm_backbone`!"
 
-        # vlm.projector.load_state_dict(model_state_dict["projector"])
-        # Keep projector weights randomly initialized
+        if (not skip_projector) and ("projector" in model_state_dict): # Keep projector weights randomly initialized
+            vlm.projector.load_state_dict(model_state_dict["projector"], strict=True)
         vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
-        if "vision_backbone" in model_state_dict.keys():
-            vlm.vision_backbone.load_state_dict(model_state_dict["vision_backbone"])
+        if (not skip_vision) and ("vision_backbone" in model_state_dict):
+            vlm.vision_backbone.load_state_dict(model_state_dict["vision_backbone"], strict=True)
 
         # Freeze Weights
         if freeze_weights:
@@ -156,7 +159,7 @@ class PrismaticVLM(VLM):
 
         :param stage: Pretraining stage in < "align" | "finetune" | "full-finetune" | "vla-train" | "vla-full-train" >
         """
-        if stage == "align":
+        if stage == "align_projector":
             self.vision_backbone.requires_grad_(False)
             self.llm_backbone.requires_grad_(False)
             self.projector.requires_grad_(True)
@@ -171,6 +174,24 @@ class PrismaticVLM(VLM):
             overwatch.info(f"[Frozen]    🥶 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[Frozen]    🥶 =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1)
             overwatch.info(f"[TRAINABLE] 🔥 =>> Projector `{self.arch_specifier}`", ctx_level=1)
+
+        elif stage == "align_vision_projector":
+            self.vision_backbone.requires_grad_(False)
+            self.llm_backbone.requires_grad_(False)
+            self.projector.requires_grad_(True)
+
+            self.vision_backbone.finetune_last_layer_modules() 
+
+            # Add to `self.trainable_module_keys`
+            self.trainable_module_keys = ["vision_backbone", "projector"]
+
+            # Update Trackers
+            self.vision_backbone_requires_grad = True
+
+            # Explicitly Log Frozen / Unfrozen Components
+            overwatch.info(f"[Frozen, except last layers] 🥶🔥 =>> Vision Backbone `{self.vision_backbone.identifier}`", ctx_level=1) 
+            overwatch.info(f"[Frozen]                     🥶   =>> LLM Backbone `{self.llm_backbone.identifier}`", ctx_level=1) 
+            overwatch.info(f"[TRAINABLE]                  🔥   =>> Projector `{self.arch_specifier}`", ctx_level=1)
 
         elif stage in {"finetune", "vla-train"}:
             self.vision_backbone.requires_grad_(False)

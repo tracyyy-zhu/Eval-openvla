@@ -55,6 +55,7 @@ class FSDPStrategy(TrainingStrategy):
         max_grad_norm: float,
         lr_scheduler_type: str,
         warmup_ratio: float,
+        lr_num_cycles: float = 0.5,
         enable_gradient_checkpointing: bool = True,
         enable_mixed_precision_training: bool = True,
         reduce_in_full_precision: bool = False,
@@ -94,6 +95,9 @@ class FSDPStrategy(TrainingStrategy):
         assert state_dict_type == StateDictType.FULL_STATE_DICT, "Sharded state saving is not yet implemented!"
         self.fsdp_state_dict_type = state_dict_type
         self.fsdp_save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        
+        self.lr_num_cycles = lr_num_cycles
+        self.stage = stage
 
     def save_checkpoint(
         self,
@@ -185,24 +189,47 @@ class FSDPStrategy(TrainingStrategy):
         # head = llama.get_output_embeddings().weight
         # assert emb.ndim == 2 and head.ndim == 2, (emb.shape, head.shape)
 
-        # self.vlm = FSDP(
-        #     self.vlm,
-        #     auto_wrap_policy=vlm_fsdp_wrapping_policy,
-        #     mixed_precision=fsdp_precision_policy,
-        #     sharding_strategy=self.fsdp_sharding_strategy,
-        #     device_id=torch.cuda.current_device(),
-        #     limit_all_gathers=True,
-        #     use_orig_params=True,
-        #     ignored_modules=[inp, out],
-        # )
-        self.vlm.projector = FSDP(
-            self.vlm.projector, 
-            auto_wrap_policy=vlm_fsdp_wrapping_policy,
-            mixed_precision=fsdp_precision_policy,
-            sharding_strategy=self.fsdp_sharding_strategy,
-            device_id=torch.cuda.current_device(),
-            limit_all_gathers=True,
-            use_orig_params=True)
+        if self.stage == "align_projector":
+            self.vlm.projector = FSDP(
+                self.vlm.projector, 
+                auto_wrap_policy=vlm_fsdp_wrapping_policy,
+                mixed_precision=fsdp_precision_policy,
+                sharding_strategy=self.fsdp_sharding_strategy,
+                device_id=torch.cuda.current_device(),
+                limit_all_gathers=True,
+                use_orig_params=True)
+        elif self.stage == "align_vision_projector":
+            # Wrap BOTH the vision backbone and the projector, but not the whole VLM.
+            if not isinstance(self.vlm.vision_backbone, FSDP):
+                self.vlm.vision_backbone = FSDP(
+                    self.vlm.vision_backbone,
+                    auto_wrap_policy=vlm_fsdp_wrapping_policy,
+                    mixed_precision=fsdp_precision_policy,
+                    sharding_strategy=self.fsdp_sharding_strategy,
+                    device_id=torch.cuda.current_device(),
+                    limit_all_gathers=True,
+                    use_orig_params=True,
+                )
+            if not isinstance(self.vlm.projector, FSDP):
+                self.vlm.projector = FSDP(
+                    self.vlm.projector, 
+                    auto_wrap_policy=vlm_fsdp_wrapping_policy,
+                    mixed_precision=fsdp_precision_policy,
+                    sharding_strategy=self.fsdp_sharding_strategy,
+                    device_id=torch.cuda.current_device(),
+                    limit_all_gathers=True,
+                    use_orig_params=True,
+                )
+        else:
+            self.vlm = FSDP(
+                self.vlm,
+                auto_wrap_policy=vlm_fsdp_wrapping_policy,
+                mixed_precision=fsdp_precision_policy,
+                sharding_strategy=self.fsdp_sharding_strategy,
+                device_id=torch.cuda.current_device(),
+                limit_all_gathers=True,
+                use_orig_params=True,
+            )
         
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
@@ -271,7 +298,6 @@ class FSDPStrategy(TrainingStrategy):
             # Create Optimizer & LR Scheduler
             self.optimizer = AdamW(groups, lr=self.learning_rate)
             self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
-            # self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps, num_cycles=1.5) # need to change max_steps
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = 0.0
 
@@ -306,29 +332,77 @@ class FSDPStrategy(TrainingStrategy):
 
             # Default AdamW w/ specified LR & Linear Warmup / Cosine Decay & Weight Decay
             #   => Create Parameter Groups --> bias terms, normalization layer parameters shouldn't be decayed!
-            decay, no_decay = [], []
-            for name, param in self.vlm.named_parameters():
-                if not param.requires_grad:
-                    continue
+            if self.stage == "align_vision_projector":
+                proj_params, bb_block23, bb_block22, bb_final_norms, other = [], [], [], [], []
 
-                # Check on any parameters with fewer than 2 dimensions or with "bias" in the name
-                if param.ndim <= 1 or name.endswith(".bias"):
-                    no_decay.append(param)
-                else:
-                    decay.append(param)
+                for n, p in self.vlm.named_parameters():  # model contains projector + dino_featurizer
+                    if not p.requires_grad:
+                        continue
+                    if "projector" in n:
+                        proj_params.append(p)
+                    elif "dino_featurizer" in n:
+                        if ".blocks.23." in n:
+                            bb_block23.append((n, p))
+                        elif ".blocks.22." in n:
+                            bb_block22.append((n, p))
+                        elif n.endswith("dino_featurizer.norm.weight") or n.endswith("dino_featurizer.norm.bias") \
+                            or ".vit.norm." in n:  # depending on wrapper
+                            bb_final_norms.append((n, p))
+                        else:
+                            other.append((n, p))  # should be empty if you froze correctly
+                def is_norm_or_bias(n, p):
+                    return p.ndim == 1 or n.endswith(".bias") or "norm" in n.lower()
+                def pg_from(named_params, lr):
+                    wd, no_wd = [], []
+                    for n, p in named_params:
+                        (no_wd if is_norm_or_bias(n, p) else wd).append(p)
+                    groups = []
+                    if wd: groups.append({"params": wd, "lr": lr, "weight_decay": 0.05})
+                    if no_wd: groups.append({"params": no_wd, "lr": lr, "weight_decay": 0.0})
+                    return groups
+                
+                # LRs
+                lr_proj = 9e-4
+                lr_block23 = 3e-5         # highest among backbone groups
+                lr_block22 = 2e-5         # decay a bit
+                lr_final_norms = 2e-5     # small but nonzero
+                
+                param_groups = []
+                param_groups += [{"params": proj_params, "lr": lr_proj, "weight_decay": 0.05}]
+                param_groups += pg_from(bb_block23, lr_block23)
+                param_groups += pg_from(bb_block22, lr_block22)
+                param_groups += pg_from(bb_final_norms, lr_final_norms)
 
-            # Build Parameter Groups
-            groups = [{"params": decay, "weight_decay": self.weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
-            print("self.weight_decay", self.weight_decay)
+                self.optimizer = AdamW(param_groups, betas=(0.9, 0.98), eps=1e-8)
+
+            elif self.stage == "align_projector":                
+                decay, no_decay = [], []
+                for name, param in self.vlm.named_parameters():
+                    if not param.requires_grad:
+                        continue
+
+                    # Check on any parameters with fewer than 2 dimensions or with "bias" in the name
+                    if param.ndim <= 1 or name.endswith(".bias"):
+                        no_decay.append(param)
+                    else:
+                        decay.append(param)
+
+                # Build Parameter Groups
+                param_groups = [{"params": decay, "weight_decay": self.weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+
+                self.optimizer = AdamW(param_groups, lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-8)
 
             # Create Optimizer & LR Scheduler
-            self.optimizer = AdamW(groups, lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-8)
-            self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps)
+            # self.optimizer = AdamW(param_groups, lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-8)
+            # self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps) 
+            self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps, num_cycles=self.lr_num_cycles) # num_cycles use 2 or 3
+            self.print_lr_by_prefix(self.vlm, self.optimizer, prefixes=("projector","vision_backbone","dino_featurizer","siglip_featurizer"))
 
-            # LR range test
+            # LR range test -- MAKE SURE YOUR STEPS IS NOT TOO LARGE OVER 1000
+            # print("LR range test ...")
             # self.optimizer = AdamW(groups, lr=2e-6, betas=(0.9, 0.98), eps=1e-8)
             # lr_start, lr_end = 2e-7, 5e-2
-            # T = 1000
+            # T = 1000 # !!! MAX STEPS
             # def lr_lambda(step):
             #     r = lr_end / lr_start
             #     return (r ** (step / max(1, T-1)))
@@ -361,5 +435,46 @@ class FSDPStrategy(TrainingStrategy):
 
     def clip_grad_norm(self) -> None:
         # Note =>> FSDP uses a custom `clip_grad_norm_` function; requires *uniform grad dtype*
+        # self.max_grad_norm == 1.0
         # self.vlm.clip_grad_norm_(max_norm=self.max_grad_norm)
-        self.vlm.projector.clip_grad_norm_(max_norm=self.max_grad_norm)
+        # self.vlm.projector.clip_grad_norm_(max_norm=self.max_grad_norm)
+        if FSDP is not None and isinstance(self.vlm, FSDP):
+            norm_type = 2.0
+            total_norm = FSDP.clip_grad_norm_(self.vlm, self.max_grad_norm, norm_type=norm_type)
+            return float(total_norm)
+
+    def print_lr_by_prefix(self, model, optimizer, prefixes=("projector", "vision_backbone", "dino_featurizer", "siglip_featurizer")):
+        # map param id -> lr of its param_group
+        pid2lr = {}
+        for pg in optimizer.param_groups:
+            lr = pg.get("lr", optimizer.defaults.get("lr"))
+            for p in pg["params"]:
+                pid2lr[id(p)] = lr
+
+        # aggregate LRs by module prefix
+        from collections import defaultdict
+        seen = {pref: set() for pref in prefixes}
+        counts = defaultdict(int)
+
+        for name, p in model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            for pref in prefixes:
+                if name.startswith(pref):
+                    lr = pid2lr.get(id(p), None)
+                    if lr is not None:
+                        seen[pref].add(lr)
+                        counts[(pref, lr)] += 1
+                    break
+
+        # pretty print
+        print("\n[LR CHECK]")
+        for pref in prefixes:
+            if seen[pref]:
+                lrs = sorted(seen[pref])
+                print(f"  {pref}: unique LRs = {lrs}")
+                for lr in lrs:
+                    print(f"    - {counts[(pref, lr)]} params @ lr={lr}")
+            else:
+                print(f"  {pref}: (no trainable params found)")
+        print("")

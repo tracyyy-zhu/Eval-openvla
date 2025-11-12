@@ -67,6 +67,9 @@ class TrainConfig:
     resume_step: Optional[int] = None                               # Global Step to Resume (should match checkpoint)
     resume_epoch: Optional[int] = None                              # Epoch to Resume (should match checkpoint)
 
+    lr_num_cycles: Optional[float] = 0.5
+    stage: Optional[str] = "align"
+
     # Run Arguments
     run_id: Optional[str] = None                                    # Run ID for logging, Weights & Biases
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
@@ -158,9 +161,11 @@ def train(cfg: TrainConfig) -> None:
     for param in vlm.parameters():
         assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
 
-    cfg.vla.align_projector = True
-    if cfg.vla.align_projector:
-        stage = "align"
+
+    if cfg.stage == "align_projector":
+        stage = "align_projector"
+    elif cfg.stage == "align_vision_projector":
+        stage = "align_vision_projector"
     else:
         # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
         if not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:
@@ -225,6 +230,7 @@ def train(cfg: TrainConfig) -> None:
         max_grad_norm=cfg.max_grad_norm,
         lr_scheduler_type=cfg.lr_scheduler_type,
         warmup_ratio=cfg.warmup_ratio,
+        lr_num_cycles=cfg.lr_num_cycles,
         enable_gradient_checkpointing=cfg.vla.enable_gradient_checkpointing,
         enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training, #flag
         reduce_in_full_precision=cfg.vla.reduce_in_full_precision,

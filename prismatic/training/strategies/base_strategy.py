@@ -304,8 +304,8 @@ class TrainingStrategy(ABC):
 
                 with torch.autocast(
                     "cuda", 
-                    dtype=self.mixed_precision_dtype, #torch.float16, # self.mixed_precision_dtype, flag
-                    enabled=self.enable_mixed_precision_training, #True, # self.enable_mixed_precision_training flag
+                    dtype=self.mixed_precision_dtype, 
+                    enabled=self.enable_mixed_precision_training,
                 ):
                     # [Contract] self.vlm.forward() must automatically compute `loss` and return!
                     output: CausalLMOutputWithPast = self.vlm(

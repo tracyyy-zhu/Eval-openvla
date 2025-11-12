@@ -21,6 +21,8 @@ VISION_BACKBONE_TO_RESOLUTION: Dict[str, List[int]] = {
     "dinoclip-vit-l-336px": [336, 336],
     "dinosiglip-vit-so-224px": [224, 224],
     "dinosiglip-vit-so-384px": [384, 384],
+    "dinov3-siglip": [224, 224],
+    "vggt-siglip": [224, 224],
 }
 VISION_BACKBONE_TO_TIMM_ID: Dict[str, List[str]] = {
     "clip-vit-l": ["vit_large_patch14_clip_224.openai"],
@@ -35,13 +37,16 @@ VISION_BACKBONE_TO_TIMM_ID: Dict[str, List[str]] = {
     "dinoclip-vit-l-336px": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_large_patch14_clip_336.openai"],
     "dinosiglip-vit-so-224px": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_224"],
     "dinosiglip-vit-so-384px": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_384"],
+    "dinov3-siglip": ["vit_large_patch16_dinov3_qkvb.lvd1689m", "vit_so400m_patch14_siglip_224"],
+    "vggt-siglip": ["vit_large_patch16_dinov3_qkvb.lvd1689m", "vit_so400m_patch14_siglip_224"]
 }
 TIMM_OVERRIDE_ACT_LAYER: Dict[str, List[Optional[str]]] = {
     "clip-vit-l": ["quick_gelu"], "clip-vit-l-336px": ["quick_gelu"],
     "dinov2-vit-l": [None], "in1k-vit-l": [None],
     "siglip-vit-so400m": [None], "siglip-vit-so400m-384px": [None],
     "dinoclip-vit-l-336px": [None, "quick_gelu"],
-    "dinosiglip-vit-so-224px": [None, None], "dinosiglip-vit-so-384px": [None, None]
+    "dinosiglip-vit-so-224px": [None, None], "dinosiglip-vit-so-384px": [None, None],
+    "dinov3-siglip": [None, None]
 }
 
 LLM_BACKBONE_TO_HF_PATH = {
@@ -105,7 +110,7 @@ class PrismaticConfig(PretrainedConfig):
         self.use_fused_vision_backbone = (
             use_fused_vision_backbone
             if use_fused_vision_backbone is not None
-            else any(self.vision_backbone_id.startswith(v) for v in ["dinoclip", "dinosiglip"])
+            else any(self.vision_backbone_id.startswith(v) for v in ["dinoclip", "dinosiglip", "dinov3-siglip"])
         )
 
         self.timm_model_ids = VISION_BACKBONE_TO_TIMM_ID[self.vision_backbone_id]
