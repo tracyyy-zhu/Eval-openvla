@@ -110,7 +110,7 @@ class PrismaticConfig(PretrainedConfig):
         self.use_fused_vision_backbone = (
             use_fused_vision_backbone
             if use_fused_vision_backbone is not None
-            else any(self.vision_backbone_id.startswith(v) for v in ["dinoclip", "dinosiglip", "dinov3-siglip"])
+            else any(self.vision_backbone_id.startswith(v) for v in ["dinoclip", "dinosiglip", "dinov3-siglip", "vggt-siglip"])
         )
 
         self.timm_model_ids = VISION_BACKBONE_TO_TIMM_ID[self.vision_backbone_id]

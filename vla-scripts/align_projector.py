@@ -69,6 +69,8 @@ class TrainConfig:
 
     lr_num_cycles: Optional[float] = 0.5
     stage: Optional[str] = "align"
+    skip_vision_weights: bool = False
+    skip_projector_weights: bool = False
 
     # Run Arguments
     run_id: Optional[str] = None                                    # Run ID for logging, Weights & Biases
@@ -152,7 +154,7 @@ def train(cfg: TrainConfig) -> None:
             assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
             assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
 
-        vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
+        vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True, skip_vision=cfg.skip_vision_weights, skip_projector=cfg.skip_projector_weights)
 
     else:
         vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
@@ -232,7 +234,7 @@ def train(cfg: TrainConfig) -> None:
         warmup_ratio=cfg.warmup_ratio,
         lr_num_cycles=cfg.lr_num_cycles,
         enable_gradient_checkpointing=cfg.vla.enable_gradient_checkpointing,
-        enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training, #flag
+        enable_mixed_precision_training=False, #cfg.vla.enable_mixed_precision_training, #flag
         reduce_in_full_precision=cfg.vla.reduce_in_full_precision,
         worker_init_fn=worker_init_fn,
     )   

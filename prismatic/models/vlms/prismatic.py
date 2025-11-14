@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Type, Union
 import inspect
 import sys
+import copy
 
 import torch
 from PIL import Image
@@ -132,11 +133,43 @@ class PrismaticVLM(VLM):
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
         ), "PrismaticVLM `from_pretrained` expects checkpoint with keys for `projector` AND `llm_backbone`!"
 
+        # def changed(before, after, atol=1e-8):
+        #     for k, v in after.items():
+        #         if not torch.allclose(v, before[k], atol=atol):
+        #             return True
+        #     return False
+        # print("Checkpoint changed weights?", changed(vision_backbone, vlm.vision_backbone))
+        # print("Checkpoint changed weights?", changed(projector, vlm.projector))
+        # print("Checkpoint changed weights?", changed(llm_backbone, vlm.llm_backbone))
+
+        projector_before = copy.deepcopy(vlm.projector)
         if (not skip_projector) and ("projector" in model_state_dict): # Keep projector weights randomly initialized
             vlm.projector.load_state_dict(model_state_dict["projector"], strict=True)
+        def all_weight_changed(old_proj, new_proj, atol=1e-8, rtol=1e-5):
+            all_changed = True
+            for name, new_p in new_proj.state_dict().items():
+                old_p = old_proj.state_dict()[name]
+                same = torch.allclose(
+                    new_p.detach().cpu().float(),
+                    old_p.detach().cpu().float(),
+                    atol=1e-8,
+                    rtol=1e-5,
+                )
+
+                # print(name, "unchanged?" , same)
+                if same:
+                    all_changed = False
+                    
+            return all_changed
+
+        # overwatch.info(f"Every projector param changed vs random init? {all_weight_changed(projector_before, vlm.projector)}", ctx_level=1)
+
         vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
+
+        vision_before = copy.deepcopy(vlm.vision_backbone)
         if (not skip_vision) and ("vision_backbone" in model_state_dict):
             vlm.vision_backbone.load_state_dict(model_state_dict["vision_backbone"], strict=True)
+        # overwatch.info(f"Every vision_backbone param changed vs random init? {all_weight_changed(vision_before, vlm.vision_backbone)}", ctx_level=1)
 
         # Freeze Weights
         if freeze_weights:

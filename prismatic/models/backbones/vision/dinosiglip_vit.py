@@ -17,6 +17,8 @@ from timm.models.vision_transformer import Block, VisionTransformer
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy, transformer_auto_wrap_policy
 from torchvision.transforms import Compose, Resize
 from .timm_vit_intermediate import TimmViTIntermediate
+from .vggt_intermediate import VGGTFeaturizer
+from vggt.utils.load_fn import load_and_preprocess_images
 
 from prismatic.models.backbones.vision.base_vision import ImageTransform, LetterboxPad, VisionBackbone, unpack_tuple
 
@@ -32,6 +34,10 @@ DINOSigLIP_VISION_BACKBONES = {
     },
     "dinov3-siglip": {
         "dino": "vit_large_patch16_dinov3_qkvb.lvd1689m",
+        "siglip": "vit_so400m_patch14_siglip_224"
+    },
+    "vggt-siglip": {
+        "dino": "facebook/VGGT-1B",
         "siglip": "vit_so400m_patch14_siglip_224"
     }
 }
@@ -56,11 +62,19 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         self.siglip_timm_path_or_url = DINOSigLIP_VISION_BACKBONES[vision_backbone_id]["siglip"]
 
         # Initialize both Featurizers (ViTs) by downloading from HF / TIMM Hub if necessary
-        base_vit: VisionTransformer = timm.create_model(
-            self.dino_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
-        )
-        base_vit.eval()
-        self.dino_featurizer = TimmViTIntermediate(base_vit).eval()
+        if "VGGT" in self.dino_timm_path_or_url:
+            self.dino_featurizer: VisionTransformer = VGGTFeaturizer("facebook/VGGT-1B")
+        elif "dinov3" in self.dino_timm_path_or_url:
+            base_vit: VisionTransformer = timm.create_model(
+                self.dino_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
+            )
+            base_vit.eval()
+            self.dino_featurizer = TimmViTIntermediate(base_vit).eval()
+        else:
+            self.dino_featurizer: VisionTransformer = timm.create_model(
+                self.dino_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
+            )
+        self.dino_featurizer.eval()
 
         self.siglip_featurizer: VisionTransformer = timm.create_model(
             self.siglip_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
@@ -71,8 +85,9 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         #   => Note: By default set `get_intermediate_layers` to return the *SECOND-TO-LAST* layer patches!
         #   => TODO (siddk) Remove after resolution of https://github.com/pytorch/pytorch/issues/109385
         k_last = max(1, len(self.dino_featurizer.blocks) - 2)
+        print("len(self.dino_featurizer.blocks)", len(self.dino_featurizer.blocks))
         self.dino_featurizer.forward = unpack_tuple(
-            partial(self.dino_featurizer.get_intermediate_layers, n=k_last, apply_norm=True)
+            partial(self.dino_featurizer.get_intermediate_layers, n=k_last, norm=True, return_class_token=False)
         )
         self.siglip_featurizer.forward = unpack_tuple(
             partial(self.siglip_featurizer.get_intermediate_layers, n={len(self.siglip_featurizer.blocks) - 2})
@@ -215,14 +230,15 @@ class DinoSigLIPViTBackbone(VisionBackbone):
     def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
+        # vggt_patches.shape (32, 256, 2048)
         # siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
-        N_d = self.dino_featurizer.patch_embed.num_patches
-        N_s = self.siglip_featurizer.patch_embed.num_patches
-        if N_s != N_d:
-            Hd, Wd = self.hw_from_num_patches(N_d)
-            Hs, Ws = self.hw_from_num_patches(N_s)
-            dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
-            print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
+        # N_d = self.dino_featurizer.patch_embed.num_patches
+        # N_s = self.siglip_featurizer.patch_embed.num_patches
+        # if N_s != N_d:
+        #     Hd, Wd = self.hw_from_num_patches(N_d)
+        #     Hs, Ws = self.hw_from_num_patches(N_s)
+        #     dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
+        #     print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
         print("Only DINO vision features are used!")

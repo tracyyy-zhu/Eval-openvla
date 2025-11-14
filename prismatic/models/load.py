@@ -129,6 +129,8 @@ def load_vla(
     load_for_training: bool = False,
     step_to_load: Optional[int] = None,
     model_type: str = "pretrained",
+    skip_vision=False,
+    skip_projector=False
 ) -> OpenVLA:
     """Loads a pretrained OpenVLA from either local disk or the HuggingFace Hub."""
 
@@ -224,8 +226,8 @@ def load_vla(
         freeze_weights=not load_for_training,
         norm_stats=norm_stats,
         action_tokenizer=action_tokenizer,
-        skip_vision=True,
-        skip_projector=True,
+        skip_vision=skip_vision, #flag
+        skip_projector=skip_projector, #flag
     )
 
     return vla

@@ -491,8 +491,8 @@ class Prism_7B_DINOSigLIP_224px_Controlled(Exp_7B_One_Stage):
 class Prism_7B_DINOSigLIP_224px(Exp_7B_One_Stage):
     model_id: str = "prism-dinosiglip-224px+7b"
     # vision_backbone_id: str = "dinosiglip-vit-so-224px" 
-    vision_backbone_id: str = "dinov3-siglip" 
-    # vision_backbone_id: str = "vggt-siglip"
+    # vision_backbone_id: str = "dinov3-siglip" 
+    vision_backbone_id: str = "vggt-siglip"
     image_resize_strategy: str = "resize-naive"
     llm_backbone_id: str = "llama2-7b-pure"
     arch_specifier: str = "no-align+fused-gelu-mlp"
