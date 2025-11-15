@@ -59,6 +59,8 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         self.dino_timm_path_or_url = DINOSigLIP_VISION_BACKBONES[vision_backbone_id]["dino"]
         if "vit_large_patch16_dinov3_qkvb" in self.dino_timm_path_or_url:
             print("Using DINOv3!")
+        elif "VGGT" in self.dino_timm_path_or_url:
+            print("Using VGGT!")
         self.siglip_timm_path_or_url = DINOSigLIP_VISION_BACKBONES[vision_backbone_id]["siglip"]
 
         # Initialize both Featurizers (ViTs) by downloading from HF / TIMM Hub if necessary
@@ -245,7 +247,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
-        print("Only DINO vision features are used!")
+        print("Only VGGT vision features are used!")
         return dino_patches
         # print("Only SigLIP vision features are used!")
         # return siglip_patches
