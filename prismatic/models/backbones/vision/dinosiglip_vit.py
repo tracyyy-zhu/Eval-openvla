@@ -85,7 +85,6 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         #   => Note: By default set `get_intermediate_layers` to return the *SECOND-TO-LAST* layer patches!
         #   => TODO (siddk) Remove after resolution of https://github.com/pytorch/pytorch/issues/109385
         k_last = max(1, len(self.dino_featurizer.blocks) - 2)
-        print("len(self.dino_featurizer.blocks)", len(self.dino_featurizer.blocks))
         self.dino_featurizer.forward = unpack_tuple(
             partial(self.dino_featurizer.get_intermediate_layers, n=k_last, norm=True, return_class_token=False)
         )
@@ -95,7 +94,10 @@ class DinoSigLIPViTBackbone(VisionBackbone):
 
         # Get Configs for _both_ Featurizers =>> Note :: Override default image size for larger resolution models
         self.dino_data_cfg = timm.data.resolve_model_data_config(self.dino_featurizer)
-        self.dino_data_cfg["input_size"] = (3, self.default_image_size, self.default_image_size)
+        if "VGGT" in self.dino_timm_path_or_url:
+            self.dino_data_cfg["input_size"] = (3, 518, 518)
+        else:
+            self.dino_data_cfg["input_size"] = (3, self.default_image_size, self.default_image_size)
 
         self.siglip_data_cfg = timm.data.resolve_model_data_config(self.siglip_featurizer)
         self.siglip_data_cfg["input_size"] = (3, self.default_image_size, self.default_image_size)
@@ -121,10 +123,11 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             assert isinstance(default_siglip_transform.transforms[0], Resize)
 
             target_size = (self.default_image_size, self.default_image_size)
+            vggt_target_size = (518, 518)
             dino_transform = Compose(
                 [
-                    Resize(target_size, interpolation=default_dino_transform.transforms[0].interpolation),
-                    *default_dino_transform.transforms[1:],
+                    Resize(vggt_target_size, interpolation=default_dino_transform.transforms[0].interpolation),
+                    *default_dino_transform.transforms[1:-1],
                 ]
             )
             siglip_transform = Compose(
@@ -218,7 +221,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         Hf, Wf = from_hw
         assert N == Hf * Wf
         x = tokens.view(B, Hf, Wf, C).permute(0, 3, 1, 2)   # (B, C, Hf, Wf)
-        x = F.interpolate(x, size=to_hw, mode="bilinear", align_corners=False)
+        x = F.adaptive_avg_pool2d(x, to_hw)
         x = x.permute(0, 2, 3, 1).contiguous().view(B, to_hw[0]*to_hw[1], C)
         return x
     
@@ -229,16 +232,17 @@ class DinoSigLIPViTBackbone(VisionBackbone):
 
     def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
+        assert pixel_values["dino"].min() >= 0.0 and pixel_values["dino"].max() <= 1.0
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
-        # (32, 3, 224, 224) --> (32, 256, 2048)
+        # (32, 3, 224, 224) --> (32, 1369, 2048)
         # siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
-        # N_d = self.dino_featurizer.patch_embed.num_patches
-        # N_s = self.siglip_featurizer.patch_embed.num_patches
-        # if N_s != N_d:
-        #     Hd, Wd = self.hw_from_num_patches(N_d)
-        #     Hs, Ws = self.hw_from_num_patches(N_s)
-        #     dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
-        #     print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
+        N_d = dino_patches.shape[1]
+        N_s = self.siglip_featurizer.patch_embed.num_patches
+        if N_s != N_d:
+            Hd, Wd = self.hw_from_num_patches(N_d)
+            Hs, Ws = self.hw_from_num_patches(N_s)
+            dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
+            print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
         print("Only DINO vision features are used!")
