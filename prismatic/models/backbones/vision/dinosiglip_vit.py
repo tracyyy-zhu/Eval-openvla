@@ -7,6 +7,7 @@ Vision backbone that returns concatenated features from both DINOv2 and SigLIP.
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable, Dict, Tuple, Sequence
+import sys
 
 import timm
 import torch
@@ -18,7 +19,8 @@ from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy, transfo
 from torchvision.transforms import Compose, Resize
 from .timm_vit_intermediate import TimmViTIntermediate
 from .vggt_intermediate import VGGTFeaturizer
-from vggt.utils.load_fn import load_and_preprocess_images
+# from vggt.utils.load_fn import load_and_preprocess_images
+import numpy as np
 
 from prismatic.models.backbones.vision.base_vision import ImageTransform, LetterboxPad, VisionBackbone, unpack_tuple
 
@@ -66,6 +68,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         # Initialize both Featurizers (ViTs) by downloading from HF / TIMM Hub if necessary
         if "VGGT" in self.dino_timm_path_or_url:
             self.dino_featurizer: VisionTransformer = VGGTFeaturizer("facebook/VGGT-1B")
+            print("VGGT pretrained weights ARE LOADED!")
         elif "dinov3" in self.dino_timm_path_or_url:
             base_vit: VisionTransformer = timm.create_model(
                 self.dino_timm_path_or_url, pretrained=True, num_classes=0, img_size=self.default_image_size
@@ -237,7 +240,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         assert pixel_values["dino"].min() >= 0.0 and pixel_values["dino"].max() <= 1.0
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
         # (32, 3, 224, 224) --> (32, 1369, 2048)
-        # siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
+        siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
         N_d = dino_patches.shape[1]
         N_s = self.siglip_featurizer.patch_embed.num_patches
         if N_s != N_d:
@@ -246,8 +249,15 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
             print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
+        with torch.no_grad():
+            print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
+            siglip_patches = torch.stack(siglip_patches, dim=0)
+            # print("type(siglip_patches)", type(siglip_patches))
+            print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
+
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
         print("Only VGGT vision features are used!")
+        # sys.exit()
         return dino_patches
         # print("Only SigLIP vision features are used!")
         # return siglip_patches
