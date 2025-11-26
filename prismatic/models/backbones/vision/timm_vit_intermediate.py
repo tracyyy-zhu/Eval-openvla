@@ -17,10 +17,12 @@ class TimmViTIntermediate(nn.Module):
         self.vit = vit
         self.patch_embed = vit.patch_embed
         self.cls_token   = getattr(vit, "cls_token", None)
-        self.pos_embed   = getattr(vit, "pos_embed", None)
-        self.pos_drop    = getattr(vit, "pos_drop", nn.Identity())
+        print("self.cls_token", self.cls_token)
+        # self.pos_embed   = getattr(vit, "pos_embed", None)
+        # self.pos_drop    = getattr(vit, "pos_drop", nn.Identity())
         self.blocks      = vit.blocks
         self.norm        = getattr(vit, "norm", None)
+        print("self.norm", self.norm)
         self.patch_embed.flatten = True
         self.patch_embed.output_fmt = "NLC"
         self.embed_dim = getattr(vit, "embed_dim", None) or getattr(vit, "num_features", None)
@@ -30,22 +32,29 @@ class TimmViTIntermediate(nn.Module):
         if self.n_storage_tokens > 0:
             self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
         self.rope_embed = getattr(vit, "rope_embed", None)
+        print("self.rope_embed", self.rope_embed)
         self.untie_cls_and_patch_norms = getattr(vit, "untie_cls_and_patch_norms", False)
+        print("self.untie_cls_and_patch_norms", self.untie_cls_and_patch_norms)
         self.cls_norm   = getattr(vit, "fc_norm", None)  # cls-only norm if untied
-        self.has_cls_token = hasattr(vit, "cls_token")
+        print("self.cls_norm", self.cls_norm)
+        # self.has_cls_token = hasattr(vit, "cls_token")
 
     @torch.no_grad()
     def prepare_tokens_with_masks(self, x: Tensor, masks=None) -> Tuple[Tensor, Tuple[int]]:
         # before [32, 3, 224, 224]
         x = self.patch_embed(x)               # [32, 196, 1024]
+        print("NaN in patch_embed?", bool(torch.isnan(x).any()))
         B, _, _ = x.shape
         H, W = 14, 14
+        print("NaN in self.cls_token?", bool(torch.isnan(self.cls_token).any()))
 
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
             cls_token = self.cls_token
+            print("NaN in cls_token masks None?", bool(torch.isnan(cls_token).any()))
         else:
             cls_token = self.cls_token + 0 * self.mask_token
+            print("NaN in cls_token masks None?", bool(torch.isnan(cls_token).any()))
         if self.n_storage_tokens > 0:
             storage_tokens = self.storage_tokens
         else:
@@ -71,6 +80,7 @@ class TimmViTIntermediate(nn.Module):
     @torch.no_grad()
     def _get_intermediate_layers_not_chunked(self, x: Tensor, n: int = 1) -> List[Tensor]:
         x, (H, W) = self.prepare_tokens_with_masks(x)
+        print("NaN in prepare_tokens_with_masks?", bool(torch.isnan(x).any()))
         # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
@@ -100,6 +110,8 @@ class TimmViTIntermediate(nn.Module):
           - else: each element is [B, P, D] (patch tokens)
         """
         outputs = self._get_intermediate_layers_not_chunked(x, n)
+        outputs = torch.stack(outputs, dim=0)
+        print("NaN right after _get_intermediate_layers_not_chunked?", bool(torch.isnan(outputs).any()))
         if apply_norm:
             outputs_normed = []
             for out in outputs:

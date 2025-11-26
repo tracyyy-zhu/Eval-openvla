@@ -215,7 +215,8 @@ class DinoSigLIPViTBackbone(VisionBackbone):
     def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
-        # siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
+        print("NaN right after DINO backbone?",bool(torch.isnan(dino_patches).any()))
+        siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
         N_d = self.dino_featurizer.patch_embed.num_patches
         N_s = self.siglip_featurizer.patch_embed.num_patches
         if N_s != N_d:
@@ -223,6 +224,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             Hs, Ws = self.hw_from_num_patches(N_s)
             dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
             print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
+        # print("NaN after resizing?", bool(torch.isnan(dino_patches).any()))
 
         with torch.no_grad():
             print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())

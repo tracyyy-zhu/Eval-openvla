@@ -132,6 +132,16 @@ class PrismaticVLM(VLM):
             "projector" in model_state_dict and "llm_backbone" in model_state_dict
         ), "PrismaticVLM `from_pretrained` expects checkpoint with keys for `projector` AND `llm_backbone`!"
 
+
+        def check_block(sd_part, name):
+            print(f"Checking {name}")
+            for k, v in sd_part.items():
+                if torch.is_tensor(v) and torch.isnan(v).any():
+                    print("  NaNs in", k, v.dtype, v.shape)
+        check_block(model_state_dict["projector"], "projector")
+        check_block(model_state_dict["llm_backbone"], "llm_backbone")
+        check_block(model_state_dict.get("vision_backbone", {}), "vision_backbone")
+
         if (not skip_projector) and ("projector" in model_state_dict): # Keep projector weights randomly initialized
             vlm.projector.load_state_dict(model_state_dict["projector"], strict=True)
         vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])

@@ -234,7 +234,7 @@ def train(cfg: TrainConfig) -> None:
         warmup_ratio=cfg.warmup_ratio,
         lr_num_cycles=cfg.lr_num_cycles,
         enable_gradient_checkpointing=cfg.vla.enable_gradient_checkpointing,
-        enable_mixed_precision_training=False, #cfg.vla.enable_mixed_precision_training, #flag
+        enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training, #flag
         reduce_in_full_precision=cfg.vla.reduce_in_full_precision,
         worker_init_fn=worker_init_fn,
     )   
