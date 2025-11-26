@@ -224,6 +224,12 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
             print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
+        with torch.no_grad():
+            print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
+            siglip_patches = torch.stack(siglip_patches, dim=0)
+            # print("type(siglip_patches)", type(siglip_patches))
+            print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
+
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
         print("Only DINO vision features are used!")
         return dino_patches
