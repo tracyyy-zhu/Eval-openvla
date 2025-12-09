@@ -250,8 +250,18 @@ class VLAMetrics:
             "lr": [],
         }
 
+        # Validation metrics buffers (no grad-accum notion here)
+        self.val_state = {
+            "val_loss": deque(maxlen=window_size),
+            "val_l1_loss": deque(maxlen=window_size),
+            "val_action_accuracy": deque(maxlen=window_size),
+        }
+
         # Created metrics buffers for individual tracked datasets
         self.dataset_trackers = defaultdict(lambda: VLAMetrics([], "", "", {}))
+
+        # Validation metrics per dataset
+        self.val_dataset_trackers = defaultdict(lambda: VLAMetrics([], "", "", {}))
 
     def log(self, global_step: int, metrics: Dict[str, Union[int, float]]) -> None:
         for tracker in self.trackers:
@@ -305,6 +315,43 @@ class VLAMetrics:
     def commit_for_dataset(self, dataset_name: str, **kwargs) -> None:
         self.dataset_trackers[dataset_name].commit(**kwargs)
 
+    def commit_validation(
+        self,
+        *,
+        loss: Optional[torch.Tensor] = None,
+        l1_loss: Optional[torch.Tensor] = None,
+        action_accuracy: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
+        """
+        Update validation metrics in `self.val_state`.
+        Intended to be called inside your validation loop.
+        """
+        if not overwatch.is_rank_zero():
+            return
+
+        if loss is not None:
+            self.val_state["val_loss"].append(loss.detach())
+
+        if l1_loss is not None:
+            self.val_state["val_l1_loss"].append(l1_loss.detach())
+
+        if action_accuracy is not None:
+            self.val_state["val_action_accuracy"].append(action_accuracy.detach())
+
+        # If you ever want extra val metrics, you can handle them via kwargs
+        for key, value in kwargs.items():
+            if key not in self.val_state:
+                # lazily create new deque if needed
+                self.val_state[key] = deque(maxlen=len(self.val_state["val_loss"]))
+            self.val_state[key].append(value.detach())
+
+    def commit_validation_for_dataset(self, dataset_name: str, **kwargs) -> None:
+        """
+        Same as `commit_validation`, but for a particular dataset.
+        """
+        self.val_dataset_trackers[dataset_name].commit_validation(**kwargs)
+
     @overwatch.rank_zero_only
     def push(self) -> str:
         # Note :: Raw Loss is an Average over Gradient Accumulation Steps --> No Smoothing!
@@ -342,6 +389,54 @@ class VLAMetrics:
             },
         )
         return status
+    
+    @overwatch.rank_zero_only
+    def push_validation(self) -> str:
+        """
+        Aggregate and log validation metrics.
+
+        Call this after finishing a validation pass.
+        """
+        # Handle possible empty deques gracefully
+        def _mean_tensor_deque(dq, default=float("nan")):
+            if len(dq) == 0:
+                return default
+            return torch.stack(list(dq)).mean().item()
+
+        loss = _mean_tensor_deque(self.val_state["val_loss"])
+        l1_loss = _mean_tensor_deque(self.val_state["val_l1_loss"])
+        action_accuracy = _mean_tensor_deque(self.val_state["val_action_accuracy"])
+
+        # Per-dataset validation metrics
+        dataset_metrics = {}
+        for ds, tracker in self.val_dataset_trackers.items():
+            ds_l1 = _mean_tensor_deque(tracker.val_state["val_l1_loss"])
+            ds_acc = _mean_tensor_deque(tracker.val_state["val_action_accuracy"])
+            dataset_metrics.update(
+                {
+                    f"{ds}/Val L1 Loss": ds_l1,
+                    f"{ds}/Val Action Token Accuracy": ds_acc,
+                }
+            )
+
+        prefix = "VLA Val"
+        self.log(
+            self.global_step,
+            metrics={
+                f"{prefix}/Step": self.global_step,
+                f"{prefix}/Epoch": self.epoch,
+                f"{prefix}/Loss": loss,
+                f"{prefix}/L1 Loss": l1_loss,
+                f"{prefix}/Action Token Accuracy": action_accuracy,
+                **dataset_metrics,
+            },
+        )
+
+        # Status string for printing (optional)
+        # Reuse get_status but make clear it's Val loss if you want:
+        status = f"{self.get_status()} - Val Loss :: {loss:.4f}"
+        return status
+
 
     def finalize(self) -> str:
         for tracker in self.trackers:

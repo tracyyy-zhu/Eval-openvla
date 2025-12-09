@@ -73,6 +73,7 @@ class TrainConfig:
     save_interval: int = 2500                                       # Interval for saving checkpoints (in steps)
     image_aug: bool = False                                         # Whether to enable image augmentations
     seed: int = 7                                                   # Random seed (for reproducibility)
+    val_interval: int = 1000
 
     # HF Hub Credentials (for any gated models)
     hf_token: Union[str, Path] = Path(".hf_token")                  # Environment variable or Path to HF Token
@@ -194,7 +195,7 @@ def train(cfg: TrainConfig) -> None:
 
     # Get VLA Dataset & Collator
     overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")
-    vla_dataset, action_tokenizer, collator = get_vla_dataset_and_collator(
+    (vla_dataset, val_dataset), action_tokenizer, collator = get_vla_dataset_and_collator(
         cfg.data_root_dir,
         cfg.vla.data_mix,
         image_transform=vlm.vision_backbone.get_image_transform(),
@@ -204,6 +205,8 @@ def train(cfg: TrainConfig) -> None:
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
+    print("vla_dataset legth", len(vla_dataset))
+    print("val_dataset legth", len(val_dataset))
 
     # Save dataset statistics for de-normalization at inference time
     if overwatch.is_rank_zero():
@@ -218,6 +221,7 @@ def train(cfg: TrainConfig) -> None:
         stage=stage,
         epochs=cfg.epochs,
         max_steps=cfg.max_steps,
+        val_interval=cfg.val_interval,
         global_batch_size=cfg.global_batch_size,
         per_device_batch_size=cfg.per_device_batch_size,
         learning_rate=cfg.learning_rate,
@@ -226,7 +230,7 @@ def train(cfg: TrainConfig) -> None:
         lr_scheduler_type=cfg.lr_scheduler_type,
         warmup_ratio=cfg.warmup_ratio,
         enable_gradient_checkpointing=cfg.vla.enable_gradient_checkpointing,
-        enable_mixed_precision_training=cfg.vla.enable_mixed_precision_training, #flag
+        enable_mixed_precision_training=False, #cfg.vla.enable_mixed_precision_training, #flag
         reduce_in_full_precision=cfg.vla.reduce_in_full_precision,
         worker_init_fn=worker_init_fn,
     )   
@@ -255,6 +259,7 @@ def train(cfg: TrainConfig) -> None:
     #               f"use_orig_params={getattr(m, '_use_orig_params', None)}")
     train_strategy.run_vla_training(
         vla_dataset,
+        val_dataset,
         collator,
         action_tokenizer,
         metrics,

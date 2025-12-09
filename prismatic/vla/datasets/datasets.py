@@ -98,6 +98,17 @@ class RLDSDataset(IterableDataset):
             load_language=True,
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
         )
+
+        # --- DEBUG: what exactly are we going to load? ---
+        print("[DEBUG RLDSDataset] train flag:", train)
+        print("[DEBUG RLDSDataset] mixture_spec:", mixture_spec)
+        for i, kw in enumerate(per_dataset_kwargs):
+            # kw is a dict; it *should* contain dataset name, split, data_dir, etc.
+            print(f"[DEBUG RLDSDataset] dataset_kwargs[{i}]:")
+            for k in kw:
+                if k in ("name", "split", "data_dir", "builder"):
+                    print("   ", k, "=", kw[k])
+
         rlds_config = dict(
             traj_transform_kwargs=dict(
                 window_size=1,                                      # If we wanted to feed / predict more than one step
@@ -138,6 +149,21 @@ class RLDSDataset(IterableDataset):
 
         # Initialize RLDS Dataset
         self.dataset, self.dataset_length, self.dataset_statistics = self.make_dataset(rlds_config)
+
+        # ---- DEBUG: probe the raw RLDS dataset before PyTorch DataLoader ----
+        try:
+            raw_it = self.dataset.as_numpy_iterator()
+            first_raw = next(raw_it)
+            print("[DEBUG RLDSDataset] first_raw batch keys:", list(first_raw.keys()))
+            if "dataset_name" in first_raw:
+                print("[DEBUG RLDSDataset] first_raw dataset_name:", first_raw["dataset_name"])
+            if "task" in first_raw and "language_instruction" in first_raw["task"]:
+                print("[DEBUG RLDSDataset] first_raw language:",
+                    first_raw["task"]["language_instruction"])
+        except StopIteration:
+            print("[DEBUG RLDSDataset] as_numpy_iterator() is EMPTY for train =", train)
+        except Exception as e:
+            print("[DEBUG RLDSDataset] ERROR iterating dataset (train =", train, "):", repr(e))
 
     def make_dataset(self, rlds_config):
         return make_interleaved_dataset(**rlds_config)
