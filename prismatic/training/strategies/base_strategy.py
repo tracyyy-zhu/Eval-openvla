@@ -40,6 +40,7 @@ class TrainingStrategy(ABC):
         stage: str,
         epochs: int,
         max_steps: Optional[int],
+        val_interval: Optional[int],
         global_batch_size: int,
         per_device_batch_size: int,
         learning_rate: float,
@@ -63,6 +64,7 @@ class TrainingStrategy(ABC):
         # Optimization Parameters
         self.epochs, self.max_steps = epochs, max_steps
         self.global_batch_size, self.per_device_batch_size = global_batch_size, per_device_batch_size
+        self.val_interval = val_interval
 
         self.learning_rate, self.weight_decay, self.max_grad_norm = learning_rate, weight_decay, max_grad_norm
         self.lr_scheduler_type, self.warmup_ratio = lr_scheduler_type, warmup_ratio
@@ -246,6 +248,7 @@ class TrainingStrategy(ABC):
     def run_vla_training(
         self,
         vla_dataset: IterableDataset,
+        val_dataset: IterableDataset,
         collator: PaddedCollatorForActionPrediction,
         action_tokenizer: ActionTokenizer,
         metrics: VLAMetrics,
@@ -267,6 +270,25 @@ class TrainingStrategy(ABC):
         )
         print("len(vla_dataset)", len(vla_dataset))
         print("len(dataloader)", len(dataloader))
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.per_device_batch_size,
+            sampler=None,
+            collate_fn=collator,
+            num_workers=0,
+            worker_init_fn=self.worker_init_fn,
+        )
+        print("[DEBUG] val_dataset object:", val_dataset)
+        print("[DEBUG] hasattr(val_dataset, '__iter__'):", hasattr(val_dataset, "__iter__"))
+
+        count = 0
+        for i, sample in enumerate(val_dataset):
+            print("[DEBUG] first raw sample keys:", sample.keys())
+            count += 1
+            if i == 2:
+                break
+
+        print("[DEBUG] val_dataset yielded", count, "samples in raw iteration")
 
         # === Train ===
         status = metrics.get_status()
@@ -291,16 +313,8 @@ class TrainingStrategy(ABC):
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
                 # print(f"=============== STEP {n_step} ====================")
                 # n_step += 1                
-                def move_to_device(batch, device):
-                    if torch.is_tensor(batch):
-                        return batch.to(device, non_blocking=True)
-                    elif isinstance(batch, dict):
-                        return {k: move_to_device(v, device) for k, v in batch.items()}
-                    elif isinstance(batch, list):
-                        return [move_to_device(v, device) for v in batch]
-                    else:
-                        return batch                    
-                batch = move_to_device(batch, device)
+                 
+                batch = self.move_to_device(batch, device)
 
                 with torch.autocast(
                     "cuda", 
@@ -406,6 +420,9 @@ class TrainingStrategy(ABC):
                 metrics.commit(global_step=metrics.global_step + 1, epoch=epoch, lr=self.lr_scheduler.get_last_lr()[0])
                 status = metrics.push()
 
+                if overwatch.is_rank_zero() and ((metrics.global_step + 1) % self.val_interval == 0):
+                    self.run_validation(val_loader, action_tokenizer, metrics, max_val_batches=500)
+
                 # Check for Save Interval or Max Steps & Save Checkpoint
                 if (terminate := (self.max_steps is not None and metrics.global_step >= self.max_steps)) or (
                     (metrics.global_step % save_interval) == 0
@@ -477,3 +494,121 @@ class TrainingStrategy(ABC):
                         print(f"[FSDP-HANDLE] {name or '<ROOT>'} :: {pn} shape={pp.shape} data_ptr={pp.data_ptr()}")
                 except Exception:
                     pass
+
+    def move_to_device(self, batch, device):
+        if torch.is_tensor(batch):
+            return batch.to(device, non_blocking=True)
+        elif isinstance(batch, dict):
+            return {k: self.move_to_device(v, device) for k, v in batch.items()}
+        elif isinstance(batch, list):
+            return [self.move_to_device(v, device) for v in batch]
+        else:
+            return batch                    
+
+    def run_validation(self, val_dataloader, action_tokenizer, metrics, 
+                       max_val_batches: int | None = None):
+        print("Start validation!")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+
+        print("[DEBUG] val_dataloader type:", type(val_dataloader))
+        print("[DEBUG] val_dataloader.dataset type:", type(val_dataloader.dataset))
+        print("[DEBUG] len(val_dataloader):", len(val_dataloader))
+
+        try:
+            it = iter(val_dataloader)
+            first_batch = next(it)
+            print("[DEBUG] Got first val batch! keys:", first_batch.keys())
+            print("[DEBUG] input_ids shape:", first_batch["input_ids"].shape)
+        except StopIteration:
+            print("[DEBUG] val_dataloader is EMPTY (StopIteration).")
+        except Exception as e:
+            print("[DEBUG] Error while iterating val_dataloader:", repr(e))
+
+        self.vlm.eval()
+
+        total_loss = 0.0
+        total_correct = 0
+        total_mask = 0
+        total_l1 = 0.0
+        n_batches = 0
+
+        status = metrics.get_status()
+        with tqdm(
+            total=(
+                len(val_dataloader)
+            ),
+            desc=status,
+            leave=False,
+            disable=not overwatch.is_rank_zero(),
+        ) as progress:
+            with torch.no_grad():
+                for batch in val_dataloader:
+                    n_batches += 1
+                    if (max_val_batches is not None) and (n_batches > max_val_batches):
+                        break
+
+                    # Move batch to device
+                    batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                    batch = self.move_to_device(batch, device)
+
+                    with torch.autocast(
+                        "cuda",
+                        dtype=torch.float16,   # or self.mixed_precision_dtype
+                        enabled=True,          # or self.enable_mixed_precision_training
+                    ):
+                        output = self.vlm(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            pixel_values=batch["pixel_values"],
+                            labels=batch["labels"],
+                            val=True,
+                        )
+                        loss = output.loss
+
+                    # === Same action metrics as train, but no backward ===
+                    action_preds = output.logits[:, self.vlm.vision_backbone.num_patches : -1].argmax(dim=2)
+                    action_gt = batch["labels"][:, 1:].to(action_preds.device)
+                    mask = action_gt > action_tokenizer.action_token_begin_idx
+
+                    correct = ((action_preds == action_gt) & mask).sum().float()
+                    mask_count = mask.sum().float()
+
+                    # Continuous actions
+                    continuous_actions_pred = torch.tensor(
+                        action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+                    )
+                    continuous_actions_gt = torch.tensor(
+                        action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
+                    )
+                    l1 = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+
+                    total_loss += loss.item()
+                    total_correct += correct.item()
+                    total_mask += mask_count.item()
+                    total_l1 += l1.item()
+
+                    # --- update tqdm in batches ---
+                    progress.set_postfix_str(
+                        f"{n_batches}/{len(val_dataloader)} batches"
+                    )
+
+            # Reduce across workers if distributed
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                tensor = torch.tensor([total_loss, total_correct, total_mask, total_l1, n_batches], device=device)
+                torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+                total_loss, total_correct, total_mask, total_l1, n_batches = tensor.tolist()
+
+            avg_loss = total_loss / max(n_batches, 1)
+            avg_acc = total_correct / max(total_mask, 1e-8)
+            avg_l1 = total_l1 / max(n_batches, 1)
+
+            # Log validation metrics (names up to you)
+            metrics.commit_validation(
+                loss=torch.tensor(avg_loss, device=device),
+                l1_loss=torch.tensor(avg_l1, device=device),
+                action_accuracy=torch.tensor(avg_acc, device=device),
+            )
+            val_status = metrics.push_validation()
+            print(val_status)
+
+            self.vlm.train()

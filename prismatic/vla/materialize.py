@@ -7,6 +7,7 @@ exports individual functions for clear control flow.
 
 from pathlib import Path
 from typing import Tuple, Type
+import sys
 
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
@@ -43,7 +44,7 @@ def get_vla_dataset_and_collator(
 
     # Build RLDS Iterable Dataset
     cls = RLDSDataset if not episodic else EpisodicRLDSDataset
-    dataset = cls(
+    train_dataset = cls(
         data_root_dir,
         data_mix,
         batch_transform,
@@ -52,5 +53,15 @@ def get_vla_dataset_and_collator(
         train=train,
         image_aug=image_aug,
     )
+    val_dataset = cls(
+        data_root_dir,
+        data_mix,
+        batch_transform,
+        resize_resolution=default_image_resolution[1:],
+        shuffle_buffer_size=shuffle_buffer_size,
+        train=False,
+        image_aug=False,
+    )
+    dataset = (train_dataset, val_dataset)
 
     return dataset, action_tokenizer, collator
