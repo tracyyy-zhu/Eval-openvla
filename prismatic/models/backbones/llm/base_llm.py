@@ -209,9 +209,11 @@ class HFCausalLLMBackbone(LLMBackbone, ABC):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        val: Optional[bool] = False,
     ) -> CausalLMOutputWithPast:
-        print("LLM forward file", inspect.getsourcefile(self.llm.forward))
-        print("line number", inspect.getsourcelines(self.llm.forward)[1])
+        if val is False:
+            print("LLM forward file", inspect.getsourcefile(self.llm.forward))
+            print("line number", inspect.getsourcelines(self.llm.forward)[1])
         output: CausalLMOutputWithPast = self.llm(
             input_ids=input_ids,
             attention_mask=attention_mask,

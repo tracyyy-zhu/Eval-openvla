@@ -235,7 +235,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         assert h * h == num_patches, f"Non-square grid: {num_patches}"
         return (h, h)
 
-    def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, pixel_values: Dict[str, torch.Tensor], val=False,) -> torch.Tensor:
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         assert pixel_values["dino"].min() >= 0.0 and pixel_values["dino"].max() <= 1.0
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
@@ -247,20 +247,22 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             Hd, Wd = self.hw_from_num_patches(N_d)
             Hs, Ws = self.hw_from_num_patches(N_s)
             dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
-            print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
+            if val is False:
+                print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
 
         with torch.no_grad():
-            print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
+            # dino_patches = torch.stack(dino_patches, dim=0)
             siglip_patches = torch.stack(siglip_patches, dim=0)
             # print("type(siglip_patches)", type(siglip_patches))
-            print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
+            if val is False:
+                print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
+                print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
 
-        # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
-        print("Only VGGT vision features are used!")
+        if val is False:
+            print("Only VGGT vision features are used!")
         # sys.exit()
         return dino_patches
-        # print("Only SigLIP vision features are used!")
-        # return siglip_patches
+        # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
 
     @property
     def default_image_resolution(self) -> Tuple[int, int, int]:

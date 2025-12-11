@@ -201,6 +201,14 @@ def make_dataset_from_rlds(
 
     builder = tfds.builder(name, data_dir=data_dir)
 
+    train_examples = builder.info.splits["train"].num_examples
+    val_examples = builder.info.splits["val"].num_examples
+
+    if train is False:
+        print("train examples:", train_examples)
+        print("val examples:", val_examples)
+        print("ratio train/val:", train_examples / val_examples)
+
     # load or compute dataset statistics
     if isinstance(dataset_statistics, str):
         with tf.io.gfile.GFile(dataset_statistics, "r") as f:
@@ -237,6 +245,10 @@ def make_dataset_from_rlds(
         split = "train" if train else "val"
 
     dataset = dl.DLataset.from_rlds(builder, split=split, shuffle=shuffle, num_parallel_reads=num_parallel_reads)
+    # DEBUG: which files belong to this split?
+    split_info = builder.info.splits[split]
+    print(f"[DEBUG] builder.name = {builder.name}, split = {split}")
+    print(f"[DEBUG] num_shards = {split_info.num_shards}, num_examples = {split_info.num_examples}")
 
     dataset = dataset.traj_map(restructure, num_parallel_calls)
     dataset = dataset.traj_map(
@@ -569,7 +581,9 @@ def make_interleaved_dataset(
 
     # Shuffle the Dataset
     #   =>> IMPORTANT :: Shuffle AFTER .cache(), or else memory will still leak!
-    dataset = dataset.shuffle(shuffle_buffer_size)
+    # Don't shuffle when buffer_size is 0
+    if shuffle_buffer_size is not None and shuffle_buffer_size > 0:
+        dataset = dataset.shuffle(shuffle_buffer_size)
 
     # Apply Frame Transforms
     overwatch.info("Applying frame transforms on dataset...")

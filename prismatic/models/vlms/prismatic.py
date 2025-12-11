@@ -409,6 +409,7 @@ class PrismaticVLM(VLM):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         multimodal_indices: Optional[torch.LongTensor] = None,
+        val: Optional[bool] = False,
     ) -> CausalLMOutputWithPast:
         """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
         # Handle Inference (leverage cache, short-circuit on just LLM forward)
@@ -453,13 +454,14 @@ class PrismaticVLM(VLM):
         # Run Visual Feature Extraction
         with torch.set_grad_enabled(self.vision_backbone_requires_grad):
             if isinstance(pixel_values, dict):
-                patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
+                patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values}, val=val)
             else:
-                patch_features = self.vision_backbone(pixel_values[multimodal_indices])
+                patch_features = self.vision_backbone(pixel_values[multimodal_indices], val=val)
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
-        print("Proj vision mean/std:", projected_patch_embeddings.mean().item(), projected_patch_embeddings.std().item())
+        if val is False:
+            print("Proj vision mean/std:", projected_patch_embeddings.mean().item(), projected_patch_embeddings.std().item())
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(
@@ -565,6 +567,7 @@ class PrismaticVLM(VLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            val=val,
         )
 
     # === GenerationMixin Methods ===
