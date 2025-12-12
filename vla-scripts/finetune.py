@@ -10,6 +10,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Type
+import inspect
+import sys
 
 import draccus
 import torch
@@ -601,6 +603,11 @@ def save_training_checkpoint(
     Returns:
         None.
     """
+
+    # Helper: unwrap model if wrapped by DDP/FSDP
+    def _unwrap(m):
+        return getattr(m, "module", m)
+
     # Determine checkpoint paths and naming
     if cfg.save_latest_checkpoint_only:
         checkpoint_dir = run_dir
@@ -609,12 +616,13 @@ def save_training_checkpoint(
         checkpoint_dir = Path(str(run_dir) + f"--{log_step}_chkpt")
         checkpoint_name_suffix = f"{log_step}_checkpoint.pt"
 
-    adapter_dir = checkpoint_dir / "lora_adapter"
+    adapter_dir = checkpoint_dir / "lora_adapter" if cfg.use_lora else None
 
     # Create directories and save dataset statistics (main process only)
     if distributed_state.is_main_process:
         os.makedirs(checkpoint_dir, exist_ok=True)
-        os.makedirs(adapter_dir, exist_ok=True)
+        if cfg.use_lora:
+            os.makedirs(adapter_dir, exist_ok=True)
         save_dataset_statistics(train_dataset.dataset_statistics, checkpoint_dir)
         print(f"Saving Model Checkpoint for Step {log_step}")
 
@@ -623,9 +631,14 @@ def save_training_checkpoint(
 
     # Save model components (main process only)
     if distributed_state.is_main_process:
-        # Save processor and LoRA adapter
+        # Always save processor
         processor.save_pretrained(checkpoint_dir)
-        vla.module.save_pretrained(adapter_dir)
+        base_vla = _unwrap(vla)
+
+        if cfg.use_lora:
+            base_vla.save_pretrained(adapter_dir)
+        else:
+            base_vla.save_pretrained(checkpoint_dir, safe_serialization=False) #flag change back to safetensors instead of bin!
 
         # Save other components
         if cfg.use_proprio and proprio_projector is not None:
@@ -766,7 +779,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     Returns:
         None.
     """
-    assert cfg.use_lora, "Only LoRA fine-tuning is supported. Please set --use_lora=True!"
+    # assert cfg.use_lora, "Only LoRA fine-tuning is supported. Please set --use_lora=True!"
     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
         "Cannot do both L1 regression and diffusion. Please pick one of them!"
     )
@@ -835,9 +848,24 @@ def finetune(cfg: FinetuneConfig) -> None:
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.vla_path,
         torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False,
         trust_remote_code=True,
-    ).to(device_id)
+        # ignore_mismatched_sizes=True,  # crucial
+        # device_map={"": device_id},       # use if low_cpu_mem_usage=True
+        ).to(device_id)
+    def scan_state_dict(sd):
+        bad = []
+        for k, v in sd.items():
+            if torch.is_tensor(v) and (v.dtype.is_floating_point or v.dtype.is_complex):
+                if not torch.isfinite(v).all():
+                    bad.append(k)
+        return bad
+    # After loading:
+    sd = vla.state_dict()
+    bad_keys = scan_state_dict(sd)
+    if len(bad_keys) > 0:
+        print("bad_keys:", bad_keys)
+    # vla = vla.to(device_id)
 
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
@@ -853,6 +881,8 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
+    else:
+        vla.freeze_backbones(stage="align")
 
     # FiLM setup
     if cfg.use_film:
@@ -870,6 +900,28 @@ def finetune(cfg: FinetuneConfig) -> None:
             state_dict = load_checkpoint("vision_backbone", cfg.vla_path, cfg.resume_step)
             vla.model.vision_backbone.load_state_dict(state_dict)
         vla.model.vision_backbone = vla.model.vision_backbone.to(device_id)
+
+    # def unwrap_to_base(model):
+    #     # 1) strip DDP
+    #     if isinstance(model, DDP):
+    #         model = model.module
+    #     # 2) strip PEFT
+    #     if hasattr(model, "get_base_model"):
+    #         try:
+    #             model = model.get_base_model()  # preferred in recent peft
+    #         except Exception:
+    #             pass
+    #     # Fallbacks for various PEFT shapes
+    #     for attr in ("base_model", "model", "pretrained_model"):
+    #         if hasattr(model, attr):
+    #             inner = getattr(model, attr)
+    #             if isinstance(inner, torch.nn.Module):
+    #                 model = inner
+    #     return model
+    # base = unwrap_to_base(vla)
+    # print("type(base)", type(base))
+    # print("VLA forward file:", inspect.getsourcefile(base.forward))
+    # print("VLA forward starts at line:", inspect.getsourcelines(base.forward)[1])
 
     # Wrap VLA with DDP
     vla = wrap_ddp(vla, device_id, find_unused=True)
@@ -946,22 +998,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
-
-    # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
-    #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.
-    #   =>> Note that our training code does not loop over epochs because the RLDS loader does this implicitly; if using
-    #       your own Dataset, make sure to add the appropriate logic to the training loop!
-    #
-    # ---
-    # from prismatic.vla.datasets import DummyDataset
-    #
-    # train_dataset = DummyDataset(
-    #     action_tokenizer,
-    #     processor.tokenizer,
-    #     image_transform=processor.image_processor.apply_transform,
-    #     prompt_builder_fn=PurePromptBuilder,
-    # )
-    # ---
 
     # We assume that the model takes as input one third-person camera image and 1 or 2 optional wrist camera image(s)
     use_wrist_image = cfg.num_images_in_input > 1

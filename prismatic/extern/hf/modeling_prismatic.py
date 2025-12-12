@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union
+import sys
 
 import numpy as np
 import timm
@@ -34,6 +35,7 @@ from prismatic.vla.constants import (
     STOP_INDEX,
     NormalizationType,
 )
+from prismatic.models.backbones.vision.timm_vit_intermediate import TimmViTIntermediate
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
@@ -134,6 +136,7 @@ class PrismaticVisionBackbone(nn.Module):
 
         # Monkey-patch the forward function to extract the second-to-last layer features
         num_blocks = len(featurizer.blocks)
+        featurizer = TimmViTIntermediate(featurizer)
         featurizer.forward = unpack_tuple(partial(featurizer.get_intermediate_layers, n={num_blocks - 2}))
 
         return featurizer
@@ -205,6 +208,7 @@ class PrismaticVisionBackbone(nn.Module):
 
         else:
             assert self.use_fused_vision_backbone, "Multi-image inputs require using fused backbone!"
+            # print("Enter vision_backbone! ===========================")
 
             # Split `pixel_values` into individual images (each with 6 channels: 3 for SigLIP + 3 for DINOv2)
             images = torch.split(pixel_values, [6] * self.num_images_in_input, dim=1)
@@ -217,10 +221,15 @@ class PrismaticVisionBackbone(nn.Module):
 
                 # Get patches from both SigLIP and DINOv2 vision transformers
                 patches = self.featurizer(img_regular)
-                patches_fused = self.fused_featurizer(img_fused)
+                patches_fused = self.fused_featurizer(img_fused) #flag
+
+                with torch.no_grad():
+                    print("DINO token norm:", patches.norm(dim=-1).mean().item())
+                    print("SIGLIP token norm:", patches_fused.norm(dim=-1).mean().item())
 
                 # Concatenate SigLIP and DINOv2 patches along the hidden dimension
-                combined_patches = torch.cat([patches, patches_fused], dim=2)
+                # combined_patches = torch.cat([patches, patches_fused], dim=2)
+                combined_patches = patches #flag
                 all_patches.append(combined_patches)
 
             # Concatenate all patches along the patch dimension
@@ -248,6 +257,8 @@ class PrismaticProjector(nn.Module):
             self.act_fn2 = nn.GELU()
 
     def forward(self, img_patches: torch.Tensor) -> torch.Tensor:
+        # print("Enter projector! ===============")
+        # self.use_fused_vision_backbone True
         if not self.use_fused_vision_backbone:
             projected_features = self.fc1(img_patches)
             projected_features = self.act_fn1(projected_features)
@@ -290,6 +301,7 @@ class PrismaticPreTrainedModel(PreTrainedModel):
         # Important :: this HF ported version is *not* meant for training from scratch; only inference and fine-tuning!
         #   => As such, this init_weights code is not correct; if training VLMs from scratch, use the main codebase at
         #      https://github.com/TRI-ML/prismatic-vlms
+        # initialize weights as random
         std = (
             self.config.initializer_range
             if hasattr(self.config, "initializer_range")
@@ -322,11 +334,11 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         if config.use_fused_vision_backbone is None:
             raise ValueError("Missing config field `use_fused_vision_backbone`")
 
-        if timm.__version__ not in {"0.9.10", "0.9.11", "0.9.12", "0.9.16"}:
-            raise NotImplementedError(
-                "TIMM Version must be >= 0.9.10 and < 1.0.0 (breaking); please raise a GitHub Issue "
-                "if you urgently need support for latest TIMM versions."
-            )
+        # if timm.__version__ not in {"0.9.10", "0.9.11", "0.9.12", "0.9.16"}:
+        #     raise NotImplementedError(
+        #         "TIMM Version must be >= 0.9.10 and < 1.0.0 (breaking); please raise a GitHub Issue "
+        #         "if you urgently need support for latest TIMM versions."
+        #     )
 
         if (transformers.__version__ != "4.40.1") or (tokenizers.__version__ != "0.19.1"):
             logger.warning(
@@ -344,7 +356,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         # Create Multimodal Projector
         self.projector = PrismaticProjector(
             config.use_fused_vision_backbone,
-            vision_dim=self.vision_backbone.embed_dim,
+            vision_dim=self.vision_backbone.featurizer.embed_dim, #self.vision_backbone.fused_featurizer.embed_dim, #self.vision_backbone.embed_dim, #flag
             llm_dim=config.text_config.hidden_size,
         )
 
@@ -444,6 +456,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             patch_features = self.vision_backbone(pixel_values)  # (bsz, 256 * num_images, D)
 
         # Project patch embeddings into language embedding space
+        with torch.no_grad():
+            features = self.projector(patch_features)      # (B, 256, C_dino)
+
+            print("Proj DINO mean/std:", features.mean().item(), features.std().item())
         return self.projector(patch_features)
 
     def _process_proprio_features(self, projected_patch_embeddings, proprio, proprio_projector):
@@ -494,6 +510,29 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             )
             return torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
         return None
+    
+    def freeze_backbones(self, stage: str) -> None:
+        """
+        This function sets `requires_grad_` on each of the component modules explicitly, depending on stage.
+
+        We support two separate stages --> "align" and "finetune".
+            => "align" --> vision_backbone*, llm_backbone* are frozen; only the `projector` is trained.
+            => "finetune" --> vision_backbone* is frozen; both `projector` and `llm_backbone` are trained.
+
+        :param stage: Pretraining stage in < "align" | "finetune" | "full-finetune" | "vla-train" | "vla-full-train" >
+        """
+        if stage == "align":
+            self.vision_backbone.requires_grad_(False)
+            self.language_model.requires_grad_(False)
+            self.projector.requires_grad_(True)
+
+            # Add to `self.trainable_module_keys`
+            self.trainable_module_keys = ["projector", "vision_backbone"]
+
+            # Explicitly Log Frozen / Trainable Components
+            print(f"[Frozen]    🥶 =>> Vision Backbone ")
+            print(f"[Frozen]    🥶 =>> LLM Backbone ")
+            print(f"[TRAINABLE] 🔥 =>> Projector ")
 
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
@@ -517,6 +556,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         use_film: bool = False,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:
         """Run a forward pass through the VLM, returning a PrismaticCausalLMOutputWithPast instance."""
+        # print("Enter forward! =============================")
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -772,11 +812,13 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def _unnormalize_actions(self, normalized_actions, unnorm_key=None):
         """Unnormalize actions using dataset statistics"""
         action_norm_stats = self.get_action_stats(unnorm_key)
+        # print("unnorm_key", unnorm_key)
 
         if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
             mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
             action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
         elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+            # print("Using normalization q99!")
             mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
             action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         else:
@@ -787,6 +829,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             0.5 * (normalized_actions + 1) * (action_high - action_low + 1e-8) + action_low,
             normalized_actions,
         )
+        # print("action_high", action_high, "action_low", action_low)
 
         return actions
 
@@ -1052,8 +1095,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 action_head,
             )
 
+        # print("pred_actions (normalized) min/max:", normalized_actions.min(), normalized_actions.max())
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
+        # print("pred_actions (UNNORM) first row:", actions[0])
+        # print("pred_actions", actions)
 
         return actions, actions_hidden_states
 
@@ -1082,4 +1128,5 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     def get_action_stats(self, unnorm_key: Optional[str] = None) -> Dict[str, Any]:
         """Get all the logged statistics for the given dataset."""
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
+        # print("self.norm_stats", self.norm_stats)
         return self.norm_stats[unnorm_key]["action"]

@@ -8,6 +8,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+import sys
+import inspect
 
 import json_numpy
 import numpy as np
@@ -285,7 +287,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         torch_dtype=torch.bfloat16,
         load_in_8bit=cfg.load_in_8bit,
         load_in_4bit=cfg.load_in_4bit,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False, #TRUE #flag
         trust_remote_code=True,
     )
 
@@ -294,7 +296,9 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         vla = _apply_film_to_vla(vla, cfg)
 
     # Set number of images in model input
+    # print("source file", inspect.getsourcefile(vla.vision_backbone.set_num_images_in_input))
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+    # sys.exit()
 
     vla.eval()
 
@@ -783,6 +787,8 @@ def get_vla_action(
             action, _ = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
         else:
             # Custom action head for continuous actions
+            # print("source file", inspect.getsourcefile(vla.predict_action)) 
+            # print("line number", print(inspect.getsourcelines(vla.predict_action)))
             action, _ = vla.predict_action(
                 **inputs,
                 unnorm_key=cfg.unnorm_key,

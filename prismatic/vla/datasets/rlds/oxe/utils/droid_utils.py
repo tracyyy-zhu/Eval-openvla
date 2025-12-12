@@ -3,18 +3,21 @@
 from typing import Any, Dict
 
 import tensorflow as tf
-import tensorflow_graphics.geometry.transformation as tfg
+# import tensorflow_graphics.geometry.transformation as tfg
 
 
 def rmat_to_euler(rot_mat):
+    import tensorflow_graphics.geometry.transformation as tfg
     return tfg.euler.from_rotation_matrix(rot_mat)
 
 
 def euler_to_rmat(euler):
+    import tensorflow_graphics.geometry.transformation as tfg
     return tfg.rotation_matrix_3d.from_euler(euler)
 
 
 def invert_rmat(rot_mat):
+    import tensorflow_graphics.geometry.transformation as tfg
     return tfg.rotation_matrix_3d.inverse(rot_mat)
 
 
