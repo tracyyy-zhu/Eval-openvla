@@ -2,6 +2,7 @@
 import torch
 from torch import Tensor, nn
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+import sys
 
 class TimmViTIntermediate(nn.Module):
     """
@@ -28,9 +29,11 @@ class TimmViTIntermediate(nn.Module):
         self.embed_dim = getattr(vit, "embed_dim", None) or getattr(vit, "num_features", None)
         assert self.embed_dim is not None, "Could not infer ViT width (embed_dim/num_features)."
         self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
         self.n_storage_tokens = n_storage_tokens
         if self.n_storage_tokens > 0:
             self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
+            nn.init.trunc_normal_(self.storage_tokens, std=0.02)
         self.rope_embed = getattr(vit, "rope_embed", None)
         print("self.rope_embed", self.rope_embed)
         self.untie_cls_and_patch_norms = getattr(vit, "untie_cls_and_patch_norms", False)
@@ -51,9 +54,25 @@ class TimmViTIntermediate(nn.Module):
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
             cls_token = self.cls_token
-            print("NaN in cls_token masks None?", bool(torch.isnan(cls_token).any()))
+            print("NaN in cls_token masks?", bool(torch.isnan(cls_token).any()))
         else:
             cls_token = self.cls_token + 0 * self.mask_token
+
+            print("cls_token:  isnan", torch.isnan(self.cls_token).any().item(),
+                "isinf", torch.isinf(self.cls_token).any().item(),
+                "isfinite", torch.isfinite(self.cls_token).all().item())
+
+            print("mask_token: isnan", torch.isnan(self.mask_token).any().item(),
+                "isinf", torch.isinf(self.mask_token).any().item(),
+                "isfinite", torch.isfinite(self.mask_token).all().item())
+
+            tmp = 0 * self.mask_token
+            print("0*mask_token: isnan", torch.isnan(tmp).any().item(),
+                "isinf", torch.isinf(tmp).any().item(),
+                "isfinite", torch.isfinite(tmp).all().item())
+
+            print("NaN in self.cls_token masks None?", bool(torch.isnan(self.cls_token).any()))
+            print("NaN in self.mask_token masks None?", bool(torch.isnan(self.mask_token).any()))
             print("NaN in cls_token masks None?", bool(torch.isnan(cls_token).any()))
         if self.n_storage_tokens > 0:
             storage_tokens = self.storage_tokens
@@ -74,6 +93,7 @@ class TimmViTIntermediate(nn.Module):
             ],
             dim=1,
         )
+        sys.exit()
 
         return x, (H, W)
 

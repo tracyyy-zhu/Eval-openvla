@@ -436,14 +436,10 @@ class PrismaticVLM(VLM):
                 patch_features = self.vision_backbone(pixel_values[multimodal_indices], val=val)
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
-<<<<<<< HEAD
         projected_patch_embeddings = self.projector(patch_features)
-        print("Proj vision mean/std:", projected_patch_embeddings.mean().item(), projected_patch_embeddings.std().item())
-=======
-        projected_patch_embeddings = self.projector(patch_features).squeeze()
+        # projected_patch_embeddings = self.projector(patch_features).squeeze()
         if val is False:
             print("Proj vision mean/std:", projected_patch_embeddings.mean().item(), projected_patch_embeddings.std().item())
->>>>>>> e05cbe9 (add validation with 500 batches)
         projected_patch_attention_mask = None
         if attention_mask is not None:
             projected_patch_attention_mask = torch.full(

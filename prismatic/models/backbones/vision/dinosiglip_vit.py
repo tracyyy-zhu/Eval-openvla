@@ -192,7 +192,6 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         transformer_block_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
         return partial(_or_policy, policies=[vit_wrap_policy, transformer_block_policy])
 
-<<<<<<< HEAD
     def resize_token_grid(self, tokens: torch.Tensor, from_hw: tuple[int,int], to_hw: tuple[int,int]):
         """
         tokens: (B, N, C) where N = H*W
@@ -213,10 +212,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         assert h * h == num_patches, f"Non-square grid: {num_patches}"
         return (h, h)
 
-    def forward(self, pixel_values: Dict[str, torch.Tensor]) -> torch.Tensor:
-=======
     def forward(self, pixel_values: Dict[str, torch.Tensor], val=False,) -> torch.Tensor:
->>>>>>> e05cbe9 (add validation with 500 batches)
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
         print("NaN right after DINO backbone?",bool(torch.isnan(dino_patches).any()))
@@ -237,10 +233,10 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
 
         with torch.no_grad():
-            dino_patches = torch.stack(dino_patches, dim=0)
+            # dino_patches = torch.stack(dino_patches, dim=0)
             if val is False:
                 print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
-            siglip_patches = torch.stack(siglip_patches, dim=0)
+            # siglip_patches = torch.stack(siglip_patches, dim=0)
             # print("type(siglip_patches)", type(siglip_patches))
             if val is False:
                 print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
