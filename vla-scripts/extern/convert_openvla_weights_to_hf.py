@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Union
 from collections import OrderedDict
+import sys
 
 import draccus
 import timm
@@ -34,6 +35,7 @@ from prismatic.conf import ModelConfig
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from prismatic.models.backbones.vision.vggt_intermediate import VGGTFeaturizer
 
 
 @dataclass
@@ -240,13 +242,16 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     print("[*] Loading TIMM Vision Backbone(s) and Image Transform(s) =>> Initializing PrismaticImageProcessor")
     input_sizes, interpolations, means, stds = [], [], [], []
     for idx, timm_model_id in enumerate(hf_config.timm_model_ids):
-        timm_vision_backbone = timm.create_model(
-            timm_model_id,
-            pretrained=True,
-            num_classes=0,
-            img_size=hf_config.image_sizes[idx],
-            act_layer=hf_config.timm_override_act_layers[idx],
-        )
+        if "vggt" in timm_model_id.lower():
+            timm_vision_backbone = VGGTFeaturizer(timm_model_id)
+        else:
+            timm_vision_backbone = timm.create_model(
+                timm_model_id,
+                pretrained=True,
+                num_classes=0,
+                img_size=hf_config.image_sizes[idx],
+                act_layer=hf_config.timm_override_act_layers[idx],
+            )
 
         # Get Per-Backbone Image Processing
         data_cfg = timm.data.resolve_model_data_config(timm_vision_backbone)
@@ -322,15 +327,41 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     print("[*] Building (Randomly Initialized) Model =>> OpenVLAForActionPrediction")
     hf_model = OpenVLAForActionPrediction(hf_config)
     print("hf_model.projector", hf_model.projector)
-    # remapped = remap_openvla_backbone_keys(
-    #     hf_model,
-    #     converted_state_dict,
-    #     single_backbone=True  # set False if you actually have DINO + SigLIP in this checkpoint
-    # )
-    # missing, unexpected = hf_model.load_state_dict(remapped, strict=True, assign=True)
-    # print("[load] missing:", missing)
-    # print("[load] unexpected:", unexpected)
-    hf_model.load_state_dict(converted_state_dict, strict=True, assign=True)
+    # Attempt to remap any `.scale_factor` / `.gamma` naming mismatch between checkpoint and model.
+    tgt = hf_model.state_dict()
+    remapped_for_load = OrderedDict()
+    dropped = []
+
+    for k, v in converted_state_dict.items():
+        # Exact match
+        if k in tgt and tgt[k].shape == v.shape:
+            remapped_for_load[k] = v
+            continue
+
+        # If checkpoint contains `.scale_factor` but model expects `.gamma`, map it
+        if ".scale_factor" in k:
+            k_gamma = k.replace(".scale_factor", ".gamma")
+            if k_gamma in tgt and tgt[k_gamma].shape == v.shape:
+                remapped_for_load[k_gamma] = v
+                continue
+
+        # If checkpoint contains `.gamma` but model expects `.scale_factor`, map it
+        if ".gamma" in k:
+            k_scale = k.replace(".gamma", ".scale_factor")
+            if k_scale in tgt and tgt[k_scale].shape == v.shape:
+                remapped_for_load[k_scale] = v
+                continue
+
+        # No match found -- drop for diagnostics
+        dropped.append((k, tuple(v.shape)))
+
+    print(f"[LoadRemap] kept: {len(remapped_for_load)}  dropped: {len(dropped)}  target_total: {len(tgt)}")
+    if dropped[:8]:
+        print("[LoadRemap] first few dropped examples:")
+        for d in dropped[:8]:
+            print("   ", d)
+
+    hf_model.load_state_dict(remapped_for_load, strict=True, assign=True)
 
     # Cast Model to BF16 before Saving
     hf_model.to(torch.bfloat16)

@@ -27,6 +27,7 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 from prismatic.models.backbones.vision.timm_vit_intermediate import TimmViTIntermediate #flag
+from prismatic.models.backbones.vision.vggt_intermediate import VGGTFeaturizer
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
@@ -76,14 +77,17 @@ class PrismaticVisionBackbone(nn.Module):
         #   =>> Note :: Monkey-Patch the `forward()` function of the backbone to ensure FSDP-compatibility
         #               Hardcodes `get_intermediate_layers` to return the **SECOND-TO-LAST** layer patches!
         assert len(timm_model_ids) <= 2, "Prismatic models only support up to 2 (fused) vision backbones!"
-        featurizer = timm.create_model( #flag
-            timm_model_ids[0],
-            pretrained=False,
-            num_classes=0,
-            img_size=image_sizes[0],
-            act_layer=timm_override_act_layers[0],
-        )
-        self.featurizer = TimmViTIntermediate(featurizer) #flag
+        if "vggt" in timm_model_ids[0].lower():
+            self.featurizer = VGGTFeaturizer(timm_model_ids[0])
+        else:
+            featurizer = timm.create_model( #flag
+                timm_model_ids[0],
+                pretrained=False,
+                num_classes=0,
+                img_size=image_sizes[0],
+                act_layer=timm_override_act_layers[0],
+            )
+            self.featurizer = TimmViTIntermediate(featurizer) #flag
         self.featurizer.forward = unpack_tuple(
             partial(self.featurizer.get_intermediate_layers, n={len(self.featurizer.blocks) - 2})
         )
@@ -270,6 +274,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         )
 
         # Create Multimodal Projector
+        print("self.vision_backbone.featurizer.embed_dim", self.vision_backbone.featurizer.embed_dim)
         self.projector = PrismaticProjector(
             config.use_fused_vision_backbone,
             vision_dim=self.vision_backbone.featurizer.embed_dim, #self.vision_backbone.fused_featurizer.embed_dim, #self.vision_backbone.featurizer.embed_dim, self.vision_backbone.embed_dim, #flag

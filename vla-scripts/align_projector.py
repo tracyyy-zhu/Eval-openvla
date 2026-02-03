@@ -116,8 +116,8 @@ def train(cfg: TrainConfig) -> None:
     overwatch.info("OpenVLA Training :: Warming Up")
 
     # Note => Under `torchrun` initializing `overwatch` will automatically set up `torch.distributed`
-    torch.cuda.set_device(device_id := overwatch.local_rank())
-    torch.cuda.empty_cache()
+    # torch.cuda.set_device(device_id := overwatch.local_rank())
+    # torch.cuda.empty_cache()
 
     # Configure Unique Run Name & Save Directory
     vla_id = cfg.vla.vla_id

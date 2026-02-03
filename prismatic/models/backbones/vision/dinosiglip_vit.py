@@ -144,6 +144,9 @@ class DinoSigLIPViTBackbone(VisionBackbone):
 
             self.image_transform = DinoSigLIPImageTransform(dino_transform, siglip_transform)
 
+            print("self.image_transform", self.image_transform)
+            sys.exit()
+
         elif self.image_resize_strategy == "resize-crop":
             self.image_transform = DinoSigLIPImageTransform(default_dino_transform, default_siglip_transform)
 

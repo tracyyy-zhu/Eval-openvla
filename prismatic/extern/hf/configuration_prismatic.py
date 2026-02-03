@@ -38,7 +38,7 @@ VISION_BACKBONE_TO_TIMM_ID: Dict[str, List[str]] = {
     "dinosiglip-vit-so-224px": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_224"],
     "dinosiglip-vit-so-384px": ["vit_large_patch14_reg4_dinov2.lvd142m", "vit_so400m_patch14_siglip_384"],
     "dinov3-siglip": ["vit_large_patch16_dinov3_qkvb.lvd1689m", "vit_so400m_patch14_siglip_224"],
-    "vggt-siglip": ["vit_large_patch16_dinov3_qkvb.lvd1689m", "vit_so400m_patch14_siglip_224"]
+    "vggt-siglip": ["facebook/VGGT-1B", "vit_so400m_patch14_siglip_224"]
 }
 TIMM_OVERRIDE_ACT_LAYER: Dict[str, List[Optional[str]]] = {
     "clip-vit-l": ["quick_gelu"], "clip-vit-l-336px": ["quick_gelu"],
@@ -46,7 +46,8 @@ TIMM_OVERRIDE_ACT_LAYER: Dict[str, List[Optional[str]]] = {
     "siglip-vit-so400m": [None], "siglip-vit-so400m-384px": [None],
     "dinoclip-vit-l-336px": [None, "quick_gelu"],
     "dinosiglip-vit-so-224px": [None, None], "dinosiglip-vit-so-384px": [None, None],
-    "dinov3-siglip": [None, None]
+    "dinov3-siglip": [None, None],
+    "vggt-siglip": [None, None],
 }
 
 LLM_BACKBONE_TO_HF_PATH = {
