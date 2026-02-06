@@ -202,7 +202,19 @@ def train(cfg: TrainConfig) -> None:
 
     # Get VLA Dataset & Collator
     overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")
-    (vla_dataset, val_dataset), action_tokenizer, collator = get_vla_dataset_and_collator(
+    # (vla_dataset, val_dataset), action_tokenizer, collator = get_vla_dataset_and_collator(
+    #     cfg.data_root_dir,
+    #     cfg.vla.data_mix,
+    #     image_transform=vlm.vision_backbone.get_image_transform(),
+    #     tokenizer=vlm.llm_backbone.get_tokenizer(),
+    #     prompt_builder_fn=vlm.llm_backbone.prompt_builder_fn,
+    #     default_image_resolution=vlm.vision_backbone.default_image_resolution,
+    #     shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
+    #     image_aug=cfg.image_aug,
+    # )
+    # print("vla_dataset legth", len(vla_dataset))
+    # print("val_dataset legth", len(val_dataset))
+    vla_dataset, action_tokenizer, collator = get_vla_dataset_and_collator(
         cfg.data_root_dir,
         cfg.vla.data_mix,
         image_transform=vlm.vision_backbone.get_image_transform(),
@@ -212,8 +224,6 @@ def train(cfg: TrainConfig) -> None:
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
-    print("vla_dataset legth", len(vla_dataset))
-    print("val_dataset legth", len(val_dataset))
 
     # Save dataset statistics for de-normalization at inference time
     if overwatch.is_rank_zero():
@@ -267,7 +277,7 @@ def train(cfg: TrainConfig) -> None:
     #               f"use_orig_params={getattr(m, '_use_orig_params', None)}")
     train_strategy.run_vla_training(
         vla_dataset,
-        val_dataset,
+        # val_dataset,
         collator,
         action_tokenizer,
         metrics,

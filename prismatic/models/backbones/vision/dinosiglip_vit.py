@@ -163,7 +163,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
                 raise RuntimeError("Could not find blocks in dino_featurizer")
 
             # Unfreeze last K blocks (set K=2 or 4)
-            K = 2
+            K = 4
             n = len(blocks)  # should be 24
             for i in range(n-K, n):
                 blk = blocks[i]
