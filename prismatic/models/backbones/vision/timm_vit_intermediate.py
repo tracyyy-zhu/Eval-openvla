@@ -91,7 +91,6 @@ class TimmViTIntermediate(nn.Module):
             ],
             dim=1,
         )
-        # sys.exit()
 
         return x, (H, W)
 
@@ -102,14 +101,36 @@ class TimmViTIntermediate(nn.Module):
         # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
+
+        def stats(tag, t):
+            t32 = t.detach().float()
+            print(
+                tag,
+                "finite", torch.isfinite(t).all().item(),
+                "nan", torch.isnan(t).any().item(),
+                "inf", torch.isinf(t).any().item(),
+                "min", t32.min().item(),
+                "max", t32.max().item(),
+                "mean", t32.mean().item(),
+                "std", t32.std().item(),
+            )
+
         for i, blk in enumerate(self.blocks):
             if getattr(self, "rope_embed", None) is not None:
                 rope_sincos = self.rope_embed(H=H, W=W)
             else:
                 rope_sincos = None
             x = blk(x, rope_sincos)
+
+            # if not torch.isfinite(x).all():
+            #     stats(f"after block {i}", x)
+            #     bad = (~torch.isfinite(x)).nonzero(as_tuple=False)[0].tolist()
+            #     val = x[tuple(bad)].detach().float().item()
+            #     raise RuntimeError(f"first nonfinite after block {i}, idx={bad}, val={val}")
+
             if i in blocks_to_take:
                 output.append(x)
+
         assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
         return output
 
@@ -143,6 +164,8 @@ class TimmViTIntermediate(nn.Module):
         class_tokens = [out[:, 0] for out in outputs]
         extra_tokens = [out[:, 1 : self.n_storage_tokens + 1] for out in outputs]
         outputs = [out[:, self.n_storage_tokens + 1 :] for out in outputs]
+        # print("NaN in get_intermediate_layers output?", bool(torch.isnan(outputs).any()))
+        # sys.exit()
 
         if reshape:
             B, _, h, w = x.shape

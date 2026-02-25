@@ -16,6 +16,8 @@ import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union
+import inspect
+import sys
 
 import numpy as np
 import timm
@@ -114,7 +116,7 @@ class PrismaticVisionBackbone(nn.Module):
                 if isinstance(module, LayerScale):
                     ls_apply_patch(module)
 
-    def forward(self, pixel_values: torch.Tensor, mode="", fraction=None) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Run image (`pixel_values`) through featurizer; if channel-stacked, then dispatch and sequence stack."""
         if not self.use_fused_vision_backbone:
             return self.featurizer(pixel_values)
@@ -122,37 +124,10 @@ class PrismaticVisionBackbone(nn.Module):
         # Split `pixel_values :: [bsz, 2 * 3, resolution, resolution]` =>> featurize =>> channel stack
         img, img_fused = torch.split(pixel_values, [3, 3], dim=1)
         patches, patches_fused = self.featurizer(img), self.fused_featurizer(img_fused)
-        # mode, fraction = "DINO", 0.5
-        # print(f"---------- MODE {mode} --------------")
-        # print(f"---------- FRACTION {fraction} --------------")
-        if "DINO" in mode and fraction is not None:
-            # print("Previous feature", patches.sum())
-            bsz, seq_len, feat_dim = patches.shape
-            keep_count = int(feat_dim * fraction)
-            keep_idx = torch.randperm(feat_dim, device=patches.device)[:keep_count]
-            mask = torch.zeros(feat_dim, device=patches.device)
-            mask[keep_idx] = 1.0
-            # print("Total # keep indices", torch.sum(mask))
-            mask = mask.view(1, 1, feat_dim)
-            patches = (patches * mask).to(torch.bfloat16)
-            # print("DINO Afterwards", patches.sum())
-            print(f"------ {fraction} DINO features are randomly kept ------")
-        if "SIGLIP" in mode and fraction is not None:
-            # print("Previous feature", patches_fused.sum())
-            bsz, seq_len, feat_dim = patches_fused.shape
-            keep_count = int(feat_dim * fraction)
-            keep_idx = torch.randperm(feat_dim, device=patches_fused.device)[:keep_count]
-            mask = torch.zeros(feat_dim, device=patches_fused.device)
-            mask[keep_idx] = 1.0
-            # print("Total # keep indices", torch.sum(mask))
-            mask = mask.view(1, 1, feat_dim)
-            patches_fused = (patches_fused * mask).to(torch.bfloat16)
-            # print("Afterwards", patches_fused.sum())
-            print(f"------ {fraction} SIGLIP features are randomly kept ------")
 
-        return torch.cat([patches, patches_fused], dim=2)
-        # print("Only DINO features are used!")
-        # return patches
+        # return torch.cat([patches, patches_fused], dim=2)
+        print("Only DINO features are used!")
+        return patches
 
 
 # === Prismatic Projector (nn.Module) Definitions ===
@@ -395,9 +370,14 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             assert past_key_values is None, "Unexpected key `past_key_values` provided during language-only forward!"
 
             # Visual Feature Extraction
-            # print("vision mode", self.config.vision_mode)
-            # print("fraction", self.config.fraction)
-            patch_features = self.vision_backbone(pixel_values, mode=self.config.vision_mode, fraction=self.config.fraction)
+            # print("block 10 gamma_1:", self.vision_backbone.base_model.model.featurizer.vit.blocks[10].gamma_1[:5])
+            for name, param in self.vision_backbone.named_parameters():
+                if torch.isnan(param).any():
+                    print(f"Parameter {name} contains NaN")
+            patch_features = self.vision_backbone(pixel_values) # mode=self.config.vision_mode, fraction=self.config.fraction
+            # print("NaN in patch_features?", bool(torch.isnan(patch_features).any()))
+            # with torch.autocast(device_type="cuda", enabled=False):
+                # patch_features = self.vision_backbone(pixel_values.to(torch.float32)) 
 
             # Projection Logic =>> Update Attention Mask
             projected_patch_embeddings = self.projector(patch_features)
