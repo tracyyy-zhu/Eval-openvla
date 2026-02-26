@@ -248,7 +248,7 @@ class TrainingStrategy(ABC):
     def run_vla_training(
         self,
         vla_dataset: IterableDataset,
-        val_dataset: IterableDataset,
+        # val_dataset: IterableDataset,
         collator: PaddedCollatorForActionPrediction,
         action_tokenizer: ActionTokenizer,
         metrics: VLAMetrics,
@@ -270,25 +270,25 @@ class TrainingStrategy(ABC):
         )
         print("len(vla_dataset)", len(vla_dataset))
         print("len(dataloader)", len(dataloader))
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.per_device_batch_size,
-            sampler=None,
-            collate_fn=collator,
-            num_workers=0,
-            worker_init_fn=self.worker_init_fn,
-        )
-        print("[DEBUG] val_dataset object:", val_dataset)
-        print("[DEBUG] hasattr(val_dataset, '__iter__'):", hasattr(val_dataset, "__iter__"))
+        # val_loader = DataLoader(
+        #     val_dataset,
+        #     batch_size=self.per_device_batch_size,
+        #     sampler=None,
+        #     collate_fn=collator,
+        #     num_workers=0,
+        #     worker_init_fn=self.worker_init_fn,
+        # )
+        # print("[DEBUG] val_dataset object:", val_dataset)
+        # print("[DEBUG] hasattr(val_dataset, '__iter__'):", hasattr(val_dataset, "__iter__"))
 
-        count = 0
-        for i, sample in enumerate(val_dataset):
-            print("[DEBUG] first raw sample keys:", sample.keys())
-            count += 1
-            if i == 2:
-                break
+        # count = 0
+        # for i, sample in enumerate(val_dataset):
+        #     print("[DEBUG] first raw sample keys:", sample.keys())
+        #     count += 1
+        #     if i == 2:
+        #         break
 
-        print("[DEBUG] val_dataset yielded", count, "samples in raw iteration")
+        # print("[DEBUG] val_dataset yielded", count, "samples in raw iteration")
 
         # === Train ===
         status = metrics.get_status()
@@ -313,19 +313,8 @@ class TrainingStrategy(ABC):
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
                 # print(f"=============== STEP {n_step} ====================")
                 # n_step += 1                
-
+                 
                 batch = self.move_to_device(batch, device)
-
-                def move_to_device(batch, device):
-                    if torch.is_tensor(batch):
-                        return batch.to(device, non_blocking=True)
-                    elif isinstance(batch, dict):
-                        return {k: move_to_device(v, device) for k, v in batch.items()}
-                    elif isinstance(batch, list):
-                        return [move_to_device(v, device) for v in batch]
-                    else:
-                        return batch                    
-                batch = move_to_device(batch, device)
 
                 with torch.autocast(
                     "cuda", 

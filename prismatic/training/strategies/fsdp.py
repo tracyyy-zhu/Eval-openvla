@@ -364,10 +364,11 @@ class FSDPStrategy(TrainingStrategy):
                     return groups
                 
                 # LRs
-                lr_proj = 9e-4
-                lr_block23 = 3e-5         # highest among backbone groups
-                lr_block22 = 2e-5         # decay a bit
-                lr_final_norms = 2e-5     # small but nonzero
+                lr_proj = self.learning_rate
+                print("self.learning_rate", self.learning_rate)
+                lr_block23 = self.learning_rate / 30         # highest among backbone groups
+                lr_block22 = lr_block23 * 0.7        # decay a bit
+                lr_final_norms = lr_block22 * 0.7     # small but nonzero
                 
                 param_groups = []
                 param_groups += [{"params": proj_params, "lr": lr_proj, "weight_decay": 0.05}]

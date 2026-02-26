@@ -142,7 +142,17 @@ class PrismaticVLM(VLM):
         # print("Checkpoint changed weights?", changed(projector, vlm.projector))
         # print("Checkpoint changed weights?", changed(llm_backbone, vlm.llm_backbone))
 
-        projector_before = copy.deepcopy(vlm.projector)
+        # projector_before = copy.deepcopy(vlm.projector)
+
+        def check_block(sd_part, name):
+            print(f"Checking {name}")
+            for k, v in sd_part.items():
+                if torch.is_tensor(v) and torch.isnan(v).any():
+                    print("  NaNs in", k, v.dtype, v.shape)
+        check_block(model_state_dict["projector"], "projector")
+        check_block(model_state_dict["llm_backbone"], "llm_backbone")
+        check_block(model_state_dict.get("vision_backbone", {}), "vision_backbone")
+
         if (not skip_projector) and ("projector" in model_state_dict): # Keep projector weights randomly initialized
             vlm.projector.load_state_dict(model_state_dict["projector"], strict=True)
         def all_weight_changed(old_proj, new_proj, atol=1e-8, rtol=1e-5):
@@ -460,6 +470,7 @@ class PrismaticVLM(VLM):
 
         # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
         projected_patch_embeddings = self.projector(patch_features)
+        # projected_patch_embeddings = self.projector(patch_features).squeeze()
         if val is False:
             print("Proj vision mean/std:", projected_patch_embeddings.mean().item(), projected_patch_embeddings.std().item())
         projected_patch_attention_mask = None

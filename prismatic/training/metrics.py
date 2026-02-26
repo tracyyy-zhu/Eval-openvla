@@ -389,6 +389,54 @@ class VLAMetrics:
             },
         )
         return status
+    
+    @overwatch.rank_zero_only
+    def push_validation(self) -> str:
+        """
+        Aggregate and log validation metrics.
+
+        Call this after finishing a validation pass.
+        """
+        # Handle possible empty deques gracefully
+        def _mean_tensor_deque(dq, default=float("nan")):
+            if len(dq) == 0:
+                return default
+            return torch.stack(list(dq)).mean().item()
+
+        loss = _mean_tensor_deque(self.val_state["val_loss"])
+        l1_loss = _mean_tensor_deque(self.val_state["val_l1_loss"])
+        action_accuracy = _mean_tensor_deque(self.val_state["val_action_accuracy"])
+
+        # Per-dataset validation metrics
+        dataset_metrics = {}
+        for ds, tracker in self.val_dataset_trackers.items():
+            ds_l1 = _mean_tensor_deque(tracker.val_state["val_l1_loss"])
+            ds_acc = _mean_tensor_deque(tracker.val_state["val_action_accuracy"])
+            dataset_metrics.update(
+                {
+                    f"{ds}/Val L1 Loss": ds_l1,
+                    f"{ds}/Val Action Token Accuracy": ds_acc,
+                }
+            )
+
+        prefix = "VLA Val"
+        self.log(
+            self.global_step,
+            metrics={
+                f"{prefix}/Step": self.global_step,
+                f"{prefix}/Epoch": self.epoch,
+                f"{prefix}/Loss": loss,
+                f"{prefix}/L1 Loss": l1_loss,
+                f"{prefix}/Action Token Accuracy": action_accuracy,
+                **dataset_metrics,
+            },
+        )
+
+        # Status string for printing (optional)
+        # Reuse get_status but make clear it's Val loss if you want:
+        status = f"{self.get_status()} - Val Loss :: {loss:.4f}"
+        return status
+
 
     @overwatch.rank_zero_only
     def push_validation(self) -> str:

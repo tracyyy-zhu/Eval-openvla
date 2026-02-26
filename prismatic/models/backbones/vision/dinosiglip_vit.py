@@ -189,7 +189,7 @@ class DinoSigLIPViTBackbone(VisionBackbone):
                 raise RuntimeError("Could not find blocks in dino_featurizer")
 
             # Unfreeze last K blocks (set K=2 or 4)
-            K = 2
+            K = 4
             n = len(blocks)  # should be 24
             for i in range(n-K, n):
                 blk = blocks[i]
@@ -242,9 +242,12 @@ class DinoSigLIPViTBackbone(VisionBackbone):
         """Runs the transformed image/pixel tensors through each vision backbone, returning concatenated patches."""
         assert pixel_values["dino"].min() >= 0.0 and pixel_values["dino"].max() <= 1.0
         dino_patches = self.dino_featurizer(pixel_values["dino"]) # (16, 256, 1024)
+
         # (32, 3, 224, 224) --> (32, 1369, 2048)
+        print("NaN right after DINO backbone?",bool(torch.isnan(dino_patches).any()))
         siglip_patches = self.siglip_featurizer(pixel_values["siglip"])
-        N_d = dino_patches.shape[1]
+        N_d = self.dino_featurizer.patch_embed.num_patches
+        # N_d = dino_patches.shape[1]
         N_s = self.siglip_featurizer.patch_embed.num_patches
         if N_s != N_d:
             Hd, Wd = self.hw_from_num_patches(N_d)
@@ -252,18 +255,21 @@ class DinoSigLIPViTBackbone(VisionBackbone):
             dino_patches = self.resize_token_grid(dino_patches, (Hd, Wd), (Hs, Ws))
             if val is False:
                 print(f"[Resize] DINO {Hd}×{Wd} → DINO {Hs}×{Ws}")
+        # print("NaN after resizing?", bool(torch.isnan(dino_patches).any()))
 
         with torch.no_grad():
-            # dino_patches = torch.stack(dino_patches, dim=0)
+            print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
             siglip_patches = torch.stack(siglip_patches, dim=0)
             # print("type(siglip_patches)", type(siglip_patches))
+            # dino_patches = torch.stack(dino_patches, dim=0)
             if val is False:
                 print("DINO token norm:", dino_patches.norm(dim=-1).mean().item())
                 print("SIGLIP token norm:", siglip_patches.norm(dim=-1).mean().item())
 
+            # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
         if val is False:
             print("Only VGGT vision features are used!")
-        # sys.exit()
+
         return dino_patches
         # return torch.cat([dino_patches, siglip_patches], dim=2) #flag
 

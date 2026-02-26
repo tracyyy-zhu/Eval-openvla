@@ -2,6 +2,7 @@
 import torch
 from torch import Tensor, nn
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+import sys
 
 class TimmViTIntermediate(nn.Module):
     """
@@ -17,8 +18,8 @@ class TimmViTIntermediate(nn.Module):
         self.vit = vit
         self.patch_embed = vit.patch_embed
         self.cls_token   = getattr(vit, "cls_token", None)
-        self.pos_embed   = getattr(vit, "pos_embed", None)
-        self.pos_drop    = getattr(vit, "pos_drop", nn.Identity())
+        # self.pos_embed   = getattr(vit, "pos_embed", None)
+        # self.pos_drop    = getattr(vit, "pos_drop", nn.Identity())
         self.blocks      = vit.blocks
         self.norm        = getattr(vit, "norm", None)
         self.patch_embed.flatten = True
@@ -26,26 +27,51 @@ class TimmViTIntermediate(nn.Module):
         self.embed_dim = getattr(vit, "embed_dim", None) or getattr(vit, "num_features", None)
         assert self.embed_dim is not None, "Could not infer ViT width (embed_dim/num_features)."
         self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
+        # print("mask_token:  isnan", torch.isnan(self.mask_token).any().item(),
+        #         "isinf", torch.isinf(self.mask_token).any().item(),
+        #         "isfinite", torch.isfinite(self.mask_token).all().item())
         self.n_storage_tokens = n_storage_tokens
         if self.n_storage_tokens > 0:
             self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
+            nn.init.trunc_normal_(self.storage_tokens, std=0.02)
         self.rope_embed = getattr(vit, "rope_embed", None)
         self.untie_cls_and_patch_norms = getattr(vit, "untie_cls_and_patch_norms", False)
         self.cls_norm   = getattr(vit, "fc_norm", None)  # cls-only norm if untied
-        self.has_cls_token = hasattr(vit, "cls_token")
+        # self.has_cls_token = hasattr(vit, "cls_token")
 
     @torch.no_grad()
     def prepare_tokens_with_masks(self, x: Tensor, masks=None) -> Tuple[Tensor, Tuple[int]]:
         # before [32, 3, 224, 224]
         x = self.patch_embed(x)               # [32, 196, 1024]
+        # print("NaN in patch_embed?", bool(torch.isnan(x).any()))
         B, _, _ = x.shape
         H, W = 14, 14
+        # print("NaN in self.cls_token?", bool(torch.isnan(self.cls_token).any()))
 
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
             cls_token = self.cls_token
         else:
-            cls_token = self.cls_token + 0 * self.mask_token
+            # cls_token = self.cls_token + 0 * self.mask_token
+            cls_token = self.cls_token.to(dtype=x.dtype, device=x.device)
+
+            # print("cls_token:  isnan", torch.isnan(self.cls_token).any().item(),
+            #     "isinf", torch.isinf(self.cls_token).any().item(),
+            #     "isfinite", torch.isfinite(self.cls_token).all().item())
+
+            # print("mask_token: isnan", torch.isnan(self.mask_token).any().item(),
+            #     "isinf", torch.isinf(self.mask_token).any().item(),
+            #     "isfinite", torch.isfinite(self.mask_token).all().item())
+
+            # tmp = 0 * self.mask_token
+            # print("0*mask_token: isnan", torch.isnan(tmp).any().item(),
+            #     "isinf", torch.isinf(tmp).any().item(),
+            #     "isfinite", torch.isfinite(tmp).all().item())
+
+            # print("NaN in self.cls_token masks None?", bool(torch.isnan(self.cls_token).any()))
+            # print("NaN in self.mask_token masks None?", bool(torch.isnan(self.mask_token).any()))
+            # print("NaN in cls_token masks None?", bool(torch.isnan(cls_token).any()))
         if self.n_storage_tokens > 0:
             storage_tokens = self.storage_tokens
         else:
@@ -71,17 +97,40 @@ class TimmViTIntermediate(nn.Module):
     @torch.no_grad()
     def _get_intermediate_layers_not_chunked(self, x: Tensor, n: int = 1) -> List[Tensor]:
         x, (H, W) = self.prepare_tokens_with_masks(x)
+        # print("NaN in prepare_tokens_with_masks?", bool(torch.isnan(x).any()))
         # If n is an int, take the n last blocks. If it's a list, take them
         output, total_block_len = [], len(self.blocks)
         blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
+
+        def stats(tag, t):
+            t32 = t.detach().float()
+            print(
+                tag,
+                "finite", torch.isfinite(t).all().item(),
+                "nan", torch.isnan(t).any().item(),
+                "inf", torch.isinf(t).any().item(),
+                "min", t32.min().item(),
+                "max", t32.max().item(),
+                "mean", t32.mean().item(),
+                "std", t32.std().item(),
+            )
+
         for i, blk in enumerate(self.blocks):
             if getattr(self, "rope_embed", None) is not None:
                 rope_sincos = self.rope_embed(H=H, W=W)
             else:
                 rope_sincos = None
             x = blk(x, rope_sincos)
+
+            # if not torch.isfinite(x).all():
+            #     stats(f"after block {i}", x)
+            #     bad = (~torch.isfinite(x)).nonzero(as_tuple=False)[0].tolist()
+            #     val = x[tuple(bad)].detach().float().item()
+            #     raise RuntimeError(f"first nonfinite after block {i}, idx={bad}, val={val}")
+
             if i in blocks_to_take:
                 output.append(x)
+
         assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
         return output
 
@@ -100,6 +149,8 @@ class TimmViTIntermediate(nn.Module):
           - else: each element is [B, P, D] (patch tokens)
         """
         outputs = self._get_intermediate_layers_not_chunked(x, n)
+        outputs = torch.stack(outputs, dim=0)
+        # print("NaN right after _get_intermediate_layers_not_chunked?", bool(torch.isnan(outputs).any()))
         if apply_norm:
             outputs_normed = []
             for out in outputs:
@@ -113,6 +164,8 @@ class TimmViTIntermediate(nn.Module):
         class_tokens = [out[:, 0] for out in outputs]
         extra_tokens = [out[:, 1 : self.n_storage_tokens + 1] for out in outputs]
         outputs = [out[:, self.n_storage_tokens + 1 :] for out in outputs]
+        # print("NaN in get_intermediate_layers output?", bool(torch.isnan(outputs).any()))
+        # sys.exit()
 
         if reshape:
             B, _, h, w = x.shape

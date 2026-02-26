@@ -53,15 +53,15 @@ def get_vla_dataset_and_collator(
         train=train,
         image_aug=image_aug,
     )
-    val_dataset = cls(
-        data_root_dir,
-        data_mix,
-        batch_transform,
-        resize_resolution=default_image_resolution[1:],
-        shuffle_buffer_size=shuffle_buffer_size,
-        train=False,
-        image_aug=False,
-    )
-    dataset = (train_dataset, val_dataset)
+    # val_dataset = cls(
+    #     data_root_dir,
+    #     data_mix,
+    #     batch_transform,
+    #     resize_resolution=default_image_resolution[1:],
+    #     shuffle_buffer_size=shuffle_buffer_size,
+    #     train=False,
+    #     image_aug=False,
+    # )
+    # dataset = (train_dataset, val_dataset)
 
-    return dataset, action_tokenizer, collator
+    return train_dataset, action_tokenizer, collator
