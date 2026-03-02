@@ -39,6 +39,7 @@ from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConf
 from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from peft.tuners.lora import LoraLayer
+from transformers import get_cosine_schedule_with_warmup
 
 import wandb
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
@@ -266,6 +267,24 @@ def finetune(cfg: FinetuneConfig) -> None:
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
+    # LR range test
+    # print("In the process of LR range test ...")
+    # lr_start, lr_end = 1e-7, 5e-2
+    # num_steps = 1000 # !!! MAX STEPS
+    # lr_factor = (lr_end / lr_start) ** (1 / num_steps)
+    # for pg in optimizer.param_groups:
+    #     pg['lr'] = lr_start
+
+    # Calculate steps
+    total_steps = cfg.max_steps
+    warmup_steps = 1500 # int(0.03 * total_steps) # 3% warmup is standard
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=warmup_steps, 
+        num_training_steps=total_steps
+    )
+
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
@@ -393,8 +412,23 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 progress.update()
+
+                # # Update LR for Range Test
+                # for param_group in optimizer.param_groups:
+                #     param_group['lr'] *= lr_factor
+                    
+                # Optional: Log the current LR to WandB to see it against the loss
+                if distributed_state.is_main_process:
+                    wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=gradient_step_idx)
+                # progress.update()
+                
+                # # Stop early once the LR range test is done
+                # if gradient_step_idx >= num_steps:
+                #     print("LR Range Test Complete. Check WandB for the 'elbow' in the loss curve.")
+                #     return
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
             if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:

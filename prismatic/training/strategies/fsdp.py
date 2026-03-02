@@ -398,20 +398,20 @@ class FSDPStrategy(TrainingStrategy):
             # Create Optimizer & LR Scheduler
             # self.optimizer = AdamW(param_groups, lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-8)
             # self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps) 
-            self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps, num_cycles=self.lr_num_cycles) # num_cycles use 2 or 3
-            self.print_lr_by_prefix(self.vlm, self.optimizer, prefixes=("projector","vision_backbone","dino_featurizer","siglip_featurizer"))
+            # self.lr_scheduler = get_cosine_schedule_with_warmup(self.optimizer, num_warmup_steps, num_training_steps, num_cycles=self.lr_num_cycles) # num_cycles use 2 or 3
+            # self.print_lr_by_prefix(self.vlm, self.optimizer, prefixes=("projector","vision_backbone","dino_featurizer","siglip_featurizer"))
 
             # LR range test -- MAKE SURE YOUR STEPS IS NOT TOO LARGE OVER 1000
-            # print("LR range test ...")
-            # self.optimizer = AdamW(groups, lr=2e-6, betas=(0.9, 0.98), eps=1e-8)
-            # lr_start, lr_end = 2e-7, 5e-2
-            # T = 1000 # !!! MAX STEPS
-            # def lr_lambda(step):
-            #     r = lr_end / lr_start
-            #     return (r ** (step / max(1, T-1)))
-            # for pg in self.optimizer.param_groups:
-            #     pg['lr'] = lr_start
-            # self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+            print("LR range test ...")
+            self.optimizer = AdamW(groups, lr=2e-6, betas=(0.9, 0.98), eps=1e-8)
+            lr_start, lr_end = 2e-7, 5e-2
+            T = 1000 # !!! MAX STEPS
+            def lr_lambda(step):
+                r = lr_end / lr_start
+                return (r ** (step / max(1, T-1)))
+            for pg in self.optimizer.param_groups:
+                pg['lr'] = lr_start
+            self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
         else:
             raise ValueError(f"Learning Rate Schedule with type `{self.lr_scheduler_type}` is not supported!")
