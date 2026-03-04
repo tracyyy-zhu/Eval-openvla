@@ -213,7 +213,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         lora_config = LoraConfig(
             r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
+            lora_alpha=min(cfg.lora_rank, 128), # recommended to keep lora_alpha:lora_rank=1:1
             lora_dropout=cfg.lora_dropout,
             # target_modules="all-linear",
             target_modules=target_modules, # Use the list we just built
@@ -277,7 +277,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Calculate steps
     total_steps = cfg.max_steps
-    warmup_steps = 1500 # int(0.03 * total_steps) # 3% warmup is standard
+    warmup_steps = int(0.03 * total_steps) # 3% warmup is standard
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, 
