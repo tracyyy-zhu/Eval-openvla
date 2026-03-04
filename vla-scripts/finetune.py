@@ -162,10 +162,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.vla_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
-        low_cpu_mem_usage=True,  # False avoids meta tensors
-        device_map={"": "cuda:0"}, # {"": device_id},  # or "auto" if you want automatic placement
+        low_cpu_mem_usage=True,  # If True, model is initialized with meta tensors
+        device_map={"": "auto"}, # {"": device_id}, "cuda:0" # or "auto" if you want automatic placement
         trust_remote_code=True,
-    )
+    ).to("cuda:0") 
     import glob
     # Find all shards (00001, 00002, 00003)
     shard_files = glob.glob(f"{cfg.vla_path}/pytorch_model-*.bin")

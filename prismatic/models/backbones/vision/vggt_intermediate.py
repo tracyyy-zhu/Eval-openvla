@@ -14,7 +14,7 @@ class VGGTFeaturizer(nn.Module):
     def __init__(self, hf_id: str = "facebook/VGGT-1B", device: str = "cuda"):
         super().__init__()
         self.vggt = VGGT.from_pretrained(hf_id)
-        self.vggt.to(device)
+        # self.vggt.to(device)
         self.device = device
         self.patch_embed = self.vggt.aggregator.patch_embed
 
