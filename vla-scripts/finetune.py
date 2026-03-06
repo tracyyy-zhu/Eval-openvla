@@ -200,44 +200,28 @@ def finetune(cfg: FinetuneConfig) -> None:
     # [LoRA] Wrap Model w/ PEFT `LoraConfig` =>> by default we set `target_modules=all-linear`
     if cfg.use_lora:
         # # Dynamically find the exact module paths
-        # target_modules = []
-        # for name, module in vla.named_modules():
-        #     # Only target Linear layers (LoRA requirement)
-        #     if isinstance(module, torch.nn.Linear):
-        #         # Match Vision Backbone layers (including the .vit. part)
-        #         if "vision_backbone.featurizer" in name and any(k in name for k in ["qkv", "proj", "fc1", "fc2"]):
-        #             target_modules.append(name)
-        #         # Match Projector layers
-        #         elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
-        #             target_modules.append(name)
+        target_modules = []
+        for name, module in vla.named_modules():
+            # Only target Linear layers (LoRA requirement)
+            if isinstance(module, torch.nn.Linear):
+                # Match Vision Backbone layers (including the .vit. part)
+                if "vision_backbone.featurizer" in name and any(k in name for k in ["qkv", "proj", "fc1", "fc2"]):
+                    target_modules.append(name)
+                # Match Projector layers
+                elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
+                    target_modules.append(name)
 
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16), # recommended to keep lora_alpha:lora_rank=1:1
             lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
-            # target_modules=target_modules, # Use the list we just built
+            # target_modules="all-linear",
+            target_modules=target_modules, # Use the list we just built
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
         # vla.requires_grad_(False)
-        # vision_lora = LoraConfig(
-        #     r=cfg.lora_rank,
-        #     lora_alpha=min(cfg.lora_rank, 16),
-        #     lora_dropout=cfg.lora_dropout,
-        #     target_modules=["qkv", "proj", "fc1", "fc2"],
-        #     init_lora_weights="gaussian",
-        # )
-        # vla.vision_backbone.featurizer = get_peft_model(vla.vision_backbone.featurizer, vision_lora)
-        # proj_lora = LoraConfig(
-        #     r=cfg.lora_rank,
-        #     lora_alpha=min(cfg.lora_rank, 16),
-        #     lora_dropout=cfg.lora_dropout,
-        #     target_modules=["fc1", "fc2", "fc3"],
-        #     init_lora_weights="gaussian",
-        # )
-        # vla.projector = get_peft_model(vla.projector, proj_lora)
         # for name, module in vla.named_modules():
         #     if isinstance(module, LoraLayer):
         #         print("LoraLayer:", name, type(module))
