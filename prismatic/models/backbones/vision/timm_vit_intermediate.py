@@ -16,12 +16,9 @@ class TimmViTIntermediate(nn.Module):
                  device: Any | None = None,):
         super().__init__()
         self.vit = vit
-        self.patch_embed = vit.patch_embed
-        self.cls_token   = getattr(vit, "cls_token", None)
+        # self.cls_token   = getattr(vit, "cls_token", None)
         # self.pos_embed   = getattr(vit, "pos_embed", None)
         # self.pos_drop    = getattr(vit, "pos_drop", nn.Identity())
-        self.blocks      = vit.blocks
-        self.norm        = getattr(vit, "norm", None)
         self.patch_embed.flatten = True
         self.patch_embed.output_fmt = "NLC"
         self.embed_dim = getattr(vit, "embed_dim", None) or getattr(vit, "num_features", None)
@@ -35,10 +32,38 @@ class TimmViTIntermediate(nn.Module):
         if self.n_storage_tokens > 0:
             self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
             nn.init.trunc_normal_(self.storage_tokens, std=0.02)
-        self.rope_embed = getattr(vit, "rope_embed", None)
-        self.untie_cls_and_patch_norms = getattr(vit, "untie_cls_and_patch_norms", False)
-        self.cls_norm   = getattr(vit, "fc_norm", None)  # cls-only norm if untied
+        # self.rope_embed = getattr(vit, "rope_embed", None)
+        # self.untie_cls_and_patch_norms = getattr(vit, "untie_cls_and_patch_norms", False)
+        # self.cls_norm   = getattr(vit, "fc_norm", None)  # cls-only norm if untied
         # self.has_cls_token = hasattr(vit, "cls_token")
+
+    @property
+    def blocks(self):
+        return self.vit.blocks
+
+    @property
+    def norm(self):
+        return self.vit.norm
+
+    @property
+    def patch_embed(self):
+        return self.vit.patch_embed
+
+    @property
+    def cls_token(self):
+        return getattr(self.vit, "cls_token", None)
+
+    @property
+    def cls_norm(self):
+        return getattr(self.vit, "fc_norm", None)
+    
+    @property
+    def rope_embed(self):
+        return getattr(self.vit, "rope_embed", None)
+
+    @property
+    def untie_cls_and_patch_norms(self):
+        return getattr(self.vit, "untie_cls_and_patch_norms", False)
 
     @torch.no_grad()
     def prepare_tokens_with_masks(self, x: Tensor, masks=None) -> Tuple[Tensor, Tuple[int]]:

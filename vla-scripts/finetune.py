@@ -162,10 +162,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.vla_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
-        low_cpu_mem_usage=True,  # If True, model is initialized with meta tensors
-        device_map={"": "auto"}, # {"": device_id}, "cuda:0" # or "auto" if you want automatic placement
+        low_cpu_mem_usage=False,  # False avoids meta tensors
+        # device_map={"": "cuda:0"}, # Used with low_cpu_mem_usage=True {"": device_id},  # or "auto" if you want automatic placement
         trust_remote_code=True,
-    ).to("cuda:0") 
+    ).to(device_id)
     import glob
     # Find all shards (00001, 00002, 00003)
     shard_files = glob.glob(f"{cfg.vla_path}/pytorch_model-*.bin")
@@ -198,24 +198,24 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # [LoRA] Wrap Model w/ PEFT `LoraConfig` =>> by default we set `target_modules=all-linear`
     if cfg.use_lora:
-        # Dynamically find the exact module paths
-        target_modules = []
-        for name, module in vla.named_modules():
-            # Only target Linear layers (LoRA requirement)
-            if isinstance(module, torch.nn.Linear):
-                # Match Vision Backbone layers (including the .vit. part)
-                if "vision_backbone.featurizer" in name and any(k in name for k in ["qkv", "proj", "fc1", "fc2"]):
-                    target_modules.append(name)
-                # Match Projector layers
-                elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
-                    target_modules.append(name)
+        # # Dynamically find the exact module paths
+        # target_modules = []
+        # for name, module in vla.named_modules():
+        #     # Only target Linear layers (LoRA requirement)
+        #     if isinstance(module, torch.nn.Linear):
+        #         # Match Vision Backbone layers (including the .vit. part)
+        #         if "vision_backbone.featurizer" in name and any(k in name for k in ["qkv", "proj", "fc1", "fc2"]):
+        #             target_modules.append(name)
+        #         # Match Projector layers
+        #         elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
+        #             target_modules.append(name)
 
         lora_config = LoraConfig(
             r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
+            lora_alpha=min(cfg.lora_rank, 16), # recommended to keep lora_alpha:lora_rank=1:1
             lora_dropout=cfg.lora_dropout,
-            # target_modules="all-linear",
-            target_modules=target_modules, # Use the list we just built
+            target_modules="all-linear",
+            # target_modules=target_modules, # Use the list we just built
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
@@ -257,7 +257,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Call it on your VLA model
     # print_trainable_parameters(vla)
-    # sys.exit()
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
@@ -406,7 +405,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                     # Save Processor & Weights
                     processor.save_pretrained(run_dir)
-                    vla.module.save_pretrained(save_dir, safe_serialization=False)
+                    vla.module.save_pretrained(save_dir, safe_serialization=True)
 
                 # Wait for processor and adapter weights to be saved by main process
                 dist.barrier()
@@ -414,15 +413,21 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Merge LoRA weights into model backbone for faster inference
                 #   =>> Note that merging is slow and can be done post-hoc to speed up training
                 if cfg.use_lora:
-                    base_vla = AutoModelForVision2Seq.from_pretrained(
-                        cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-                    )
-                    merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-                    merged_vla = merged_vla.merge_and_unload()
+                    # base_vla = AutoModelForVision2Seq.from_pretrained(
+                    #     cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=False, trust_remote_code=True
+                    # ).to(device_id) # This creates meta tensor
+                    peft_model = vla.module if hasattr(vla, "module") else vla
+                    # Merge LoRA weights into the base weights
+                    # merged_vla = peft_model.merge_and_unload()
+                    # Move to CPU for saving, now this is a real tensor model, not meta
+                    # merged_vla = merged_vla.to("cpu")
+
+                    # merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+                    # merged_vla = merged_vla.merge_and_unload()
                     if distributed_state.is_main_process:
                         if cfg.save_latest_checkpoint_only:
                             # Overwrite latest checkpoint
-                            merged_vla.save_pretrained(run_dir, safe_serialization=False)
+                            merged_vla.save_pretrained(run_dir, safe_serialization=True)
 
                             print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
                         else:
@@ -434,8 +439,52 @@ def finetune(cfg: FinetuneConfig) -> None:
                             save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
 
                             # Save processor and model weights to new directory
-                            processor.save_pretrained(checkpoint_dir, safe_serialization=False)
-                            merged_vla.save_pretrained(checkpoint_dir, safe_serialization=False)
+                            import torch.nn as nn
+
+                            def force_unique_gammas(model):
+                                vit = model.vision_backbone.featurizer.vit
+                                for blk in vit.blocks:
+                                    if hasattr(blk, "gamma_1") and blk.gamma_1 is not None:
+                                        new_p = nn.Parameter(blk.gamma_1.detach().clone().contiguous(),
+                                                            requires_grad=blk.gamma_1.requires_grad)
+                                        blk._parameters["gamma_1"] = new_p
+                                    if hasattr(blk, "gamma_2") and blk.gamma_2 is not None:
+                                        new_p = nn.Parameter(blk.gamma_2.detach().clone().contiguous(),
+                                                            requires_grad=blk.gamma_2.requires_grad)
+                                        blk._parameters["gamma_2"] = new_p
+
+                            def assert_gammas_unshared(model):
+                                vit = model.vision_backbone.featurizer.vit
+                                seen = set()
+                                for i, blk in enumerate(vit.blocks):
+                                    for name in ["gamma_1", "gamma_2"]:
+                                        if hasattr(blk, name) and getattr(blk, name) is not None:
+                                            p = getattr(blk, name)
+                                            key = (name, int(p.data_ptr()))
+                                            if key in seen:
+                                                raise RuntimeError(f"still shared: blocks.{i}.{name} has duplicate data_ptr {p.data_ptr()}")
+                                            seen.add(key)
+
+                            # merged_vla.to("cpu")
+                            # vit = merged_vla.vision_backbone.featurizer.vit
+                            # for i, blk in enumerate(vit.blocks[:5]):
+                            #     for n in ["gamma_1", "gamma_2"]:
+                            #         if hasattr(blk, n) and getattr(blk, n) is not None:
+                            #             p = getattr(blk, n)
+                            #             print(
+                            #                 i, n,
+                            #                 "shape", tuple(p.shape),
+                            #                 "numel", p.numel(),
+                            #                 "device", p.device,
+                            #                 "dtype", p.dtype,
+                            #                 "data_ptr", int(p.data_ptr()),
+                            #                 "is_meta", (p.device.type == "meta"),
+                            #             )
+                            # force_unique_gammas(merged_vla)
+                            # assert_gammas_unshared(peft_model)
+
+                            processor.save_pretrained(checkpoint_dir, safe_serialization=True)
+                            peft_model.save_pretrained(checkpoint_dir, safe_serialization=True)
 
                             print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
