@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import sys
+from safetensors.torch import load_file as safe_load_file
 
 import draccus
 import torch
@@ -103,6 +104,7 @@ class FinetuneConfig:
     lora_dropout: float = 0.0                                       # Dropout applied to LoRA weights
     use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
                                                                     #   => CAUTION: Reduces memory but hurts performance
+    merge_dir: str = None                                           # Optional path to merged LoRA checkpoint in initialization (DINOv3)
 
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
@@ -165,7 +167,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         low_cpu_mem_usage=False,  # False avoids meta tensors
         # device_map={"": "cuda:0"}, # Used with low_cpu_mem_usage=True {"": device_id},  # or "auto" if you want automatic placement
         trust_remote_code=True,
-    ).to(device_id)
+    )
+    if cfg.merge_dir is not None:
+        vla = PeftModel.from_pretrained(vla, cfg.merge_dir).merge_and_unload()
     import glob
     # Find all shards (00001, 00002, 00003)
     shard_files = glob.glob(f"{cfg.vla_path}/pytorch_model-*.bin")
@@ -180,7 +184,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         for k, v in sd.items ():
             if "gamma" in k or "layer_scale" in k:
                 # Move only these tiny vectors to the GPU
-                fix_dict[k] = v. to(device="cuda:0", dtype=torch.bfloat16)
+                fix_dict[k] = v. to(dtype=torch.bfloat16)
         if fix_dict:
             print(f" → Fixing {len(fix_dict)} gamma parameters...") 
             vla.load_state_dict(fix_dict, strict=False)
@@ -189,26 +193,45 @@ def finetune(cfg: FinetuneConfig) -> None:
         del sd
         del fix_dict
     # print("Check after proper load:", vla.vision_backbone.featurizer.vit.blocks[10].gamma_1[:5])
+    def load_old_lora_weights_into_expanded_model(peft_model, old_adapter_dir):
+        """
+        Load an old adapter checkpoint into a newly created expanded LoRA model.
+        Overlapping LoRA tensors are restored.
+        Newly added LoRA layers stay randomly initialized.
+        """
+        adapter_safetensors = os.path.join(old_adapter_dir, "adapter_model.safetensors")
+        adapter_bin = os.path.join(old_adapter_dir, "adapter_model.bin")
 
-    # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
-    if cfg.use_quantization:
-        vla = prepare_model_for_kbit_training(vla)
-    else:
-        vla = vla.to(device_id)
+        if os.path.exists(adapter_safetensors):
+            old_sd = safe_load_file(adapter_safetensors)
+        elif os.path.exists(adapter_bin):
+            old_sd = torch.load(adapter_bin, map_location="cpu")
+        else:
+            raise FileNotFoundError(f"Cannot find adapter weights in {old_adapter_dir}")
+
+        missing, unexpected = peft_model.load_state_dict(old_sd, strict=False)
+        print(f"Loaded old adapter weights from {old_adapter_dir}")
+        print(f"Missing keys count: {len(missing)}")
+        print(f"Unexpected keys count: {len(unexpected)}")
+
+        return peft_model
 
     # [LoRA] Wrap Model w/ PEFT `LoraConfig` =>> by default we set `target_modules=all-linear`
+    vla.requires_grad_(False)
     if cfg.use_lora:
-        # # Dynamically find the exact module paths
-        # target_modules = []
-        # for name, module in vla.named_modules():
-        #     # Only target Linear layers (LoRA requirement)
-        #     if isinstance(module, torch.nn.Linear):
-        #         # Match Vision Backbone layers (including the .vit. part)
-        #         if "vision_backbone.featurizer" in name and any(k in name for k in ["qkv", "proj", "fc1", "fc2"]):
-        #             target_modules.append(name)
-        #         # Match Projector layers
-        #         elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
-        #             target_modules.append(name)
+        # Dynamically find the exact module paths
+        target_modules = []
+        for name, module in vla.named_modules():
+            # Only target Linear layers (LoRA requirement)
+            if isinstance(module, torch.nn.Linear):
+                # Match Vision Backbone layers (including the .vit. part)
+                if "vision_backbone.featurizer" in name and any(k in name for k in ["patch_embed.proj", "attn.qkv", "attn.proj", "mlp.fc1", "mlp.fc2"]):
+                    target_modules.append(name)
+                # Match Projector layers
+                elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
+                    target_modules.append(name)
+                elif "language_model" in name and any(k in name for k in ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]):
+                    target_modules.append(name)
 
         lora_config = LoraConfig(
             r=cfg.lora_rank,
@@ -219,51 +242,44 @@ def finetune(cfg: FinetuneConfig) -> None:
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
+        # if cfg.merge_dir is not None:
+        #     vla = load_old_lora_weights_into_expanded_model(vla, cfg.merge_dir)
+
         vla.print_trainable_parameters()
-        # vla.requires_grad_(False)
-        # vision_lora = LoraConfig(
-        #     r=cfg.lora_rank,
-        #     lora_alpha=min(cfg.lora_rank, 16),
-        #     lora_dropout=cfg.lora_dropout,
-        #     target_modules=["qkv", "proj", "fc1", "fc2"],
-        #     init_lora_weights="gaussian",
-        # )
-        # vla.vision_backbone.featurizer = get_peft_model(vla.vision_backbone.featurizer, vision_lora)
-        # proj_lora = LoraConfig(
-        #     r=cfg.lora_rank,
-        #     lora_alpha=min(cfg.lora_rank, 16),
-        #     lora_dropout=cfg.lora_dropout,
-        #     target_modules=["fc1", "fc2", "fc3"],
-        #     init_lora_weights="gaussian",
-        # )
-        # vla.projector = get_peft_model(vla.projector, proj_lora)
         # for name, module in vla.named_modules():
         #     if isinstance(module, LoraLayer):
         #         print("LoraLayer:", name, type(module))
 
-    # def print_trainable_parameters(model):
-    #     trainable_params = 0
-    #     all_param = 0
-    #     for _, param in model.named_parameters():
-    #         all_param += param.numel()
-    #         if param.requires_grad:
-    #             trainable_params += param.numel()
-        
-    #     print(
-    #         f"trainable params: {trainable_params:,} || "
-    #         f"all params: {all_param:,} || "
-    #         f"trainable%: {100 * trainable_params / all_param:.4f}%"
-    #     )
-
-    # Call it on your VLA model
-    # print_trainable_parameters(vla)
+    # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
+    if cfg.use_quantization:
+        vla = prepare_model_for_kbit_training(vla)
+    else:
+        vla = vla.to(device_id)
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
-    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
+    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True,  gradient_as_bucket_view=True) 
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
+
+    # # LR range test
+    # print("In the process of LR range test ...")
+    # lr_start, lr_end = 1e-7, 5e-2
+    # num_steps = 1000 # !!! MAX STEPS
+    # lr_factor = (lr_end / lr_start) ** (1 / num_steps)
+    # for pg in optimizer.param_groups:
+    #     pg['lr'] = lr_start
+
+    # Calculate steps
+    total_steps = cfg.max_steps
+    warmup_steps = int(0.03 * total_steps) # 3% warmup is standard
+
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=warmup_steps, 
+        num_training_steps=total_steps
+    )
 
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
@@ -326,7 +342,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         vla.train()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         for batch_idx, batch in enumerate(dataloader):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
@@ -345,23 +361,25 @@ def finetune(cfg: FinetuneConfig) -> None:
             normalized_loss.backward()
 
             # Compute Accuracy and L1 Loss for Logging
-            action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
-            action_preds = action_logits.argmax(dim=2)
-            action_gt = batch["labels"][:, 1:].to(action_preds.device)
-            mask = action_gt > action_tokenizer.action_token_begin_idx
+            with torch.no_grad():
+                logits = output.logits.detach()
+                action_logits = logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+                action_preds = action_logits.argmax(dim=2)
+                action_gt = batch["labels"][:, 1:].to(action_preds.device)
+                mask = action_gt > action_tokenizer.action_token_begin_idx
 
-            # Compute Accuracy
-            correct_preds = (action_preds == action_gt) & mask
-            action_accuracy = correct_preds.sum().float() / mask.sum().float()
+                # Compute Accuracy
+                correct_preds = (action_preds == action_gt) & mask
+                action_accuracy = correct_preds.sum().float() / mask.sum().float()
 
-            # Compute L1 Loss on Predicted (Continuous) Actions
-            continuous_actions_pred = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
-            )
-            continuous_actions_gt = torch.tensor(
-                action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
-            )
-            action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+                # Compute L1 Loss on Predicted (Continuous) Actions
+                continuous_actions_pred = torch.tensor(
+                    action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+                )
+                continuous_actions_gt = torch.tensor(
+                    action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
+                )
+                action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
 
             # Store recent train metrics
             recent_losses.append(loss.item())
@@ -392,8 +410,23 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
-                optimizer.zero_grad()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
                 progress.update()
+
+                # # Update LR for LR Range Test
+                # for param_group in optimizer.param_groups:
+                #     param_group['lr'] *= lr_factor
+                    
+                # Optional: Log the current LR to WandB to see it against the loss
+                if distributed_state.is_main_process:
+                    wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=gradient_step_idx)
+                # progress.update()
+                
+                # # Stop early once the LR range test is done
+                # if gradient_step_idx >= num_steps:
+                #     print("LR Range Test Complete. Check WandB for the 'elbow' in the loss curve.")
+                #     return
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
             if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
@@ -417,10 +450,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                     #     cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=False, trust_remote_code=True
                     # ).to(device_id) # This creates meta tensor
                     peft_model = vla.module if hasattr(vla, "module") else vla
-                    # Merge LoRA weights into the base weights
-                    # merged_vla = peft_model.merge_and_unload()
-                    # Move to CPU for saving, now this is a real tensor model, not meta
-                    # merged_vla = merged_vla.to("cpu")
 
                     # merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
                     # merged_vla = merged_vla.merge_and_unload()
