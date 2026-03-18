@@ -40,6 +40,7 @@ from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConf
 from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from peft.tuners.lora import LoraLayer
+from transformers import get_cosine_schedule_with_warmup
 
 import wandb
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
@@ -170,6 +171,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
     if cfg.merge_dir is not None:
         vla = PeftModel.from_pretrained(vla, cfg.merge_dir).merge_and_unload()
+        print("Merged LoRA weights from", cfg.merge_dir)
     import glob
     # Find all shards (00001, 00002, 00003)
     shard_files = glob.glob(f"{cfg.vla_path}/pytorch_model-*.bin")
@@ -230,15 +232,15 @@ def finetune(cfg: FinetuneConfig) -> None:
                 # Match Projector layers
                 elif "projector" in name and any(k in name for k in ["fc1", "fc2", "fc3"]):
                     target_modules.append(name)
-                elif "language_model" in name and any(k in name for k in ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]):
-                    target_modules.append(name)
+                # elif "language_model" in name and any(k in name for k in ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]):
+                #     target_modules.append(name)
 
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16), # recommended to keep lora_alpha:lora_rank=1:1
             lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
-            # target_modules=target_modules, # Use the list we just built
+            # target_modules="all-linear",
+            target_modules=target_modules, # Use the list we just built
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
@@ -249,6 +251,19 @@ def finetune(cfg: FinetuneConfig) -> None:
         # for name, module in vla.named_modules():
         #     if isinstance(module, LoraLayer):
         #         print("LoraLayer:", name, type(module))
+
+        # # Nested LoRA sanity check
+        # trainable = []
+        # for name, p in vla.named_parameters():
+        #     if p.requires_grad:
+        #         trainable.append((name, p.numel()))
+
+        # trainable = sorted(trainable, key=lambda x: x[0])
+
+        # for name, n in trainable:
+        #     print(f"{n:12d}  {name}")
+
+        # print("TOTAL:", sum(n for _, n in trainable))
 
     # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
     if cfg.use_quantization:
@@ -410,7 +425,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
-                scheduler.step()
+                scheduler.step() # comment out if LR range test
                 optimizer.zero_grad(set_to_none=True)
                 progress.update()
 
@@ -470,22 +485,25 @@ def finetune(cfg: FinetuneConfig) -> None:
                             # Save processor and model weights to new directory
                             import torch.nn as nn
 
-                            def force_unique_gammas(model):
-                                vit = model.vision_backbone.featurizer.vit
-                                for blk in vit.blocks:
-                                    if hasattr(blk, "gamma_1") and blk.gamma_1 is not None:
-                                        new_p = nn.Parameter(blk.gamma_1.detach().clone().contiguous(),
-                                                            requires_grad=blk.gamma_1.requires_grad)
-                                        blk._parameters["gamma_1"] = new_p
-                                    if hasattr(blk, "gamma_2") and blk.gamma_2 is not None:
-                                        new_p = nn.Parameter(blk.gamma_2.detach().clone().contiguous(),
-                                                            requires_grad=blk.gamma_2.requires_grad)
-                                        blk._parameters["gamma_2"] = new_p
+                            # def force_unique_gammas(model):
+                            #     vit = model.vision_backbone.featurizer.vit
+                            #     for blk in vit.blocks:
+                            #         if hasattr(blk, "gamma_1") and blk.gamma_1 is not None:
+                            #             new_p = nn.Parameter(blk.gamma_1.detach().clone().contiguous(),
+                            #                                 requires_grad=blk.gamma_1.requires_grad)
+                            #             blk._parameters["gamma_1"] = new_p
+                            #         if hasattr(blk, "gamma_2") and blk.gamma_2 is not None:
+                            #             new_p = nn.Parameter(blk.gamma_2.detach().clone().contiguous(),
+                            #                                 requires_grad=blk.gamma_2.requires_grad)
+                            #             blk._parameters["gamma_2"] = new_p
 
                             def assert_gammas_unshared(model):
-                                vit = model.vision_backbone.featurizer.vit
+                                vggt = model.vision_backbone.featurizer.vggt
                                 seen = set()
-                                for i, blk in enumerate(vit.blocks):
+                                blocks = getattr(vggt, "blocks", getattr(vggt, "layers", None))
+                                if blocks is None and hasattr(vggt, "model"): # sometimes it's nested
+                                    blocks = getattr(vggt.model, "blocks", [])
+                                for i, blk in enumerate(blocks):
                                     for name in ["gamma_1", "gamma_2"]:
                                         if hasattr(blk, name) and getattr(blk, name) is not None:
                                             p = getattr(blk, name)

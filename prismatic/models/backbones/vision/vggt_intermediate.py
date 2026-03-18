@@ -17,6 +17,7 @@ class VGGTFeaturizer(nn.Module):
         # self.vggt.to(device)
         self.device = device
         self.patch_embed = self.vggt.aggregator.patch_embed
+        self.patch_embed.num_patches = 256
 
         # For compatibility with code that does len(self.dino_featurizer.blocks)
         # We pretend we have `depth` "blocks", matching the aggregator’s depth.
@@ -35,7 +36,7 @@ class VGGTFeaturizer(nn.Module):
         x: torch.Tensor,
         n: Union[int, Iterable[int]] = 1,
         reshape: bool = False,
-        return_class_token: bool = True,
+        return_class_token: bool = False,
         norm: bool = False,
     ) -> List[torch.Tensor]:
         """
@@ -57,6 +58,8 @@ class VGGTFeaturizer(nn.Module):
         agg_list, patch_start_idx = self.vggt.aggregator(x)
         # agg_list is length = depth, each (B, S, P, 2*C)
         patches = agg_list[-1] # (32, 1, 261, 2048)
+        # 2. Squeeze the 'S' (sequence/view) dimension
+        patches = patches[:, 0, :, :]  # shape now: [16, 261, 2048]
 
         depth = len(agg_list) # =24
 
